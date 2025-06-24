@@ -733,13 +733,12 @@ class DiscordService:
     async def _websocket_connection_handler(self, session: aiohttp.ClientSession, gateway_url: str, token_index: int) -> None:
         """Handle individual WebSocket connection"""
         connection_id = f"token_{token_index}"
-        max_reconnects = 5
         reconnect_count = 0
-        
+
         base_delay = 5
         max_delay = 300
-        
-        while self.running and reconnect_count < max_reconnects:
+
+        while self.running:
             try:
                 self.logger.info(f"🔌 Connecting WebSocket for {connection_id}", 
                                gateway_url=gateway_url,
@@ -794,13 +793,13 @@ class DiscordService:
                                 error=str(e),
                                 reconnect_attempt=reconnect_count)
                 
-                if reconnect_count < max_reconnects and self.running:
+                if self.running:
                     # Exponential backoff for reconnection
-                    delay = min(60, 5 * (2 ** (reconnect_count - 1)))
+                    delay = min(max_delay, base_delay * (2 ** (reconnect_count - 1)))
                     self.logger.info(f"⏳ Reconnecting WebSocket for {connection_id} in {delay}s")
                     await asyncio.sleep(delay)
                 else:
-                    self.logger.error(f"💀 Max reconnection attempts reached for {connection_id}")
+                    self.logger.error(f"💀 Stopping reconnect attempts for {connection_id}")
                     break
         
         self.logger.info(f"🔌 WebSocket handler stopped for {connection_id}")
@@ -1004,9 +1003,9 @@ class DiscordService:
         sequence = connection_info.get('sequence')
         
         # Get token from session headers
-        token = self.settings.discord_tokens[token_index]
-        if not token.startswith('Bot '):
-            token = f'Bot {token}'
+        token = self.settings.discord_tokens[token_index].strip()
+        if token.startswith('Bot '):
+            token = token[4:].strip()
         
         resume_payload = {
             "op": 6,
