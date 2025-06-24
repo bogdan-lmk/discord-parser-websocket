@@ -1,9 +1,8 @@
 # app/services/message_processor.py - ОБНОВЛЕННЫЙ для WebSocket
 import asyncio
 import hashlib
-import threading
-from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Optional, Set, Any
+from datetime import datetime, timedelta
+from typing import List, Dict, Set, Any
 import structlog
 
 from ..models.message import DiscordMessage
@@ -144,7 +143,7 @@ class MessageProcessor:
                     server_count = len(self.discord_service.servers)
                     topic_count = len(created_topics)
                     
-                    self.logger.info(f"Topic creation results:")
+                    self.logger.info("Topic creation results:")
                     self.logger.info(f"  Servers: {server_count}")
                     self.logger.info(f"  Topics created: {topic_count}")
                     
@@ -152,7 +151,7 @@ class MessageProcessor:
                         missing = server_count - topic_count
                         self.logger.warning(f"  Missing topics: {missing}")
                     else:
-                        self.logger.info(f"  Perfect coverage: ALL servers have topics")
+                        self.logger.info("  Perfect coverage: ALL servers have topics")
                     
             except Exception as e:
                 self.logger.error(f"Error in topic creation: {e}")
