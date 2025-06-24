@@ -117,101 +117,6 @@ class DiscordService:
                     
         return False
     
-    async def initialize(self) -> bool:
-        """Инициализация Discord service с пользовательскими токенами"""
-        if self._initialization_done:
-            return True
-            
-        self.logger.info("Initializing Discord service with USER TOKENS (not bot tokens)", 
-                        token_count=len(self.settings.discord_tokens),
-                        max_servers=self.settings.max_servers,
-                        max_channels_total=self.settings.max_total_channels,
-                        token_type="USER_TOKEN")
-        
-        # Очищаем старые данные
-        self.sessions.clear()
-        self.gateway_urls.clear()
-        self.token_failure_counts.clear()
-        
-        # Создаем сессии для пользовательских токенов
-        successful_tokens = 0
-        for i, raw_token in enumerate(self.settings.discord_tokens):
-            # Очищаем токен
-            clean_token = raw_token.strip()
-            
-            # Убираем префикс "Bot " если кто-то случайно добавил
-            if clean_token.startswith('Bot '):
-                clean_token = clean_token[4:].strip()
-                self.logger.warning(f"Removed 'Bot ' prefix from user token {i+1}")
-            
-            self.logger.info(f"Initializing user token {i+1}/{len(self.settings.discord_tokens)}", 
-                            token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
-                            token_type="USER_TOKEN")
-            
-            # Создаем сессию с заголовками для пользовательского токена
-            session = aiohttp.ClientSession(
-                headers={
-                    'Authorization': clean_token,  # БЕЗ префикса "Bot"
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Content-Type': 'application/json',
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-origin',
-                    'X-Super-Properties': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI0MjAyMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
-                },
-                timeout=aiohttp.ClientTimeout(total=30, connect=10),
-                connector=aiohttp.TCPConnector(
-                    limit=20,
-                    limit_per_host=3,  # Меньше соединений для пользовательских токенов
-                    ttl_dns_cache=300,
-                    use_dns_cache=True
-                )
-            )
-            
-            if await self._validate_token_and_get_gateway(session, i):
-                self.sessions.append(session)
-                self.token_failure_counts[i] = 0
-                successful_tokens += 1
-                self.logger.info("User token validated successfully", 
-                            token_index=i,
-                            successful_count=successful_tokens)
-            else:
-                await session.close()
-                self.logger.error("User token validation failed", 
-                                token_index=i,
-                                token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
-                                help="Check token validity and ensure it's a user token, not a bot token")
-        
-        if not self.sessions:
-            self.logger.error("No valid Discord user tokens available")
-            self.logger.error("Please check your Discord USER tokens in .env file")
-            self.logger.error("Note: Use user tokens, NOT bot tokens")
-            self.logger.error("Run 'python debug_user_tokens.py' for detailed diagnostics")
-            return False
-        
-        self.logger.info(f"Successfully initialized {successful_tokens}/{len(self.settings.discord_tokens)} user tokens")
-        
-        # Поиск announcement каналов
-        try:
-            await self._discover_announcement_channels_only()
-        except Exception as e:
-            self.logger.warning("Error during channel discovery", error=str(e))
-            # Продолжаем работу даже если не удалось найти каналы
-        
-        self._initialization_done = True
-        self.logger.info("Discord service initialized with USER TOKENS", 
-                        valid_tokens=len(self.sessions),
-                        servers_found=len(self.servers),
-                        announcement_channels=len(self.monitored_announcement_channels),
-                        gateway_urls=len(self.gateway_urls),
-                        token_type="USER_TOKEN",
-                        note="Using Discord user tokens, not bot tokens")
-        return True
     
     async def _validate_token_and_get_gateway(self, session: aiohttp.ClientSession, token_index: int) -> bool:
         """Валидация пользовательского Discord токена с улучшенной обработкой ошибок"""
@@ -487,11 +392,15 @@ class DiscordService:
                     
                     # Find ONLY announcement channels
                     announcement_channels = self._find_announcement_channels_only(channels)
-                    
+
                     if not announcement_channels:
-                        self.logger.info("No announcement channels found", guild=guild_name)
-                        return
-                    
+                        self.logger.info(
+                            "No announcement channels found",
+                            guild=guild_name,
+                        )
+                        # Even without announcement channels we still want to
+                        # track the server so a Telegram topic can be created
+
                     # Add ONLY announcement channels to server
                     for channel in announcement_channels[:self.settings.max_channels_per_server]:
                         channel_info = ChannelInfo(
@@ -515,17 +424,21 @@ class DiscordService:
                     # Update server stats
                     server_info.update_stats()
                     
-                    # Store server ONLY if it has announcement channels
+                    # Store server even if it has no accessible announcement channels
+                    self.servers[guild_name] = server_info
+
                     if server_info.accessible_channel_count > 0:
-                        self.servers[guild_name] = server_info
-                        
-                        self.logger.info("Added server with announcement channels", 
-                                       guild=guild_name,
-                                       announcement_channels=len(announcement_channels),
-                                       accessible_announcement_channels=server_info.accessible_channel_count)
+                        self.logger.info(
+                            "Added server with announcement channels",
+                            guild=guild_name,
+                            announcement_channels=len(announcement_channels),
+                            accessible_announcement_channels=server_info.accessible_channel_count,
+                        )
                     else:
-                        self.logger.info("Skipped server - no accessible announcement channels", 
-                                       guild=guild_name)
+                        self.logger.info(
+                            "Added server without accessible announcement channels",
+                            guild=guild_name,
+                        )
                     
                     return
                     
@@ -1199,7 +1112,7 @@ class DiscordService:
                     break
             
             if not server_name:
-                self.logger.debug(f"🤷 Unknown server for message", 
+                self.logger.debug("🤷 Unknown server for message",
                                 guild_id=guild_id,
                                 channel_id=channel_id)
                 return
@@ -1221,7 +1134,7 @@ class DiscordService:
             # Trigger callbacks (this sends to MessageProcessor)
             await self._trigger_message_callbacks(message)
             
-            self.logger.info(f"📨 WebSocket message received",
+            self.logger.info("📨 WebSocket message received",
                            connection_id=connection_id,
                            server=server_name,
                            channel=channel_name,
