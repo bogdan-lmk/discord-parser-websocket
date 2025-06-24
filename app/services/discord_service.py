@@ -487,11 +487,15 @@ class DiscordService:
                     
                     # Find ONLY announcement channels
                     announcement_channels = self._find_announcement_channels_only(channels)
-                    
+
                     if not announcement_channels:
-                        self.logger.info("No announcement channels found", guild=guild_name)
-                        return
-                    
+                        self.logger.info(
+                            "No announcement channels found",
+                            guild=guild_name,
+                        )
+                        # Even without announcement channels we still want to
+                        # track the server so a Telegram topic can be created
+
                     # Add ONLY announcement channels to server
                     for channel in announcement_channels[:self.settings.max_channels_per_server]:
                         channel_info = ChannelInfo(
@@ -515,17 +519,21 @@ class DiscordService:
                     # Update server stats
                     server_info.update_stats()
                     
-                    # Store server ONLY if it has announcement channels
+                    # Store server even if it has no accessible announcement channels
+                    self.servers[guild_name] = server_info
+
                     if server_info.accessible_channel_count > 0:
-                        self.servers[guild_name] = server_info
-                        
-                        self.logger.info("Added server with announcement channels", 
-                                       guild=guild_name,
-                                       announcement_channels=len(announcement_channels),
-                                       accessible_announcement_channels=server_info.accessible_channel_count)
+                        self.logger.info(
+                            "Added server with announcement channels",
+                            guild=guild_name,
+                            announcement_channels=len(announcement_channels),
+                            accessible_announcement_channels=server_info.accessible_channel_count,
+                        )
                     else:
-                        self.logger.info("Skipped server - no accessible announcement channels", 
-                                       guild=guild_name)
+                        self.logger.info(
+                            "Added server without accessible announcement channels",
+                            guild=guild_name,
+                        )
                     
                     return
                     
