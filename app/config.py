@@ -93,8 +93,6 @@ class Settings(BaseSettings):
     health_check_interval: int = Field(default=120, ge=30, le=300)
     
     # Специальные настройки для большого количества серверов
-    max_concurrent_server_processing: int = Field(default=5, ge=1, le=20, env="MAX_CONCURRENT_SERVER_PROCESSING")
-    server_discovery_batch_size: int = Field(default=10, ge=5, le=25, env="SERVER_DISCOVERY_BATCH_SIZE")
     channel_test_timeout: int = Field(default=5, ge=2, le=15, env="CHANNEL_TEST_TIMEOUT")
     
     @field_validator('discord_auth_tokens')
