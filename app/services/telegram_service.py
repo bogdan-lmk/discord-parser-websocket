@@ -7,6 +7,16 @@ from threading import Lock
 import structlog
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# Helper to escape characters for Telegram Markdown
+def escape_markdown(text: str) -> str:
+    if not text:
+        return ""
+    return (
+        text.replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+    )
 import os
 import threading
 
@@ -1751,43 +1761,45 @@ class TelegramService:
                 return
             
             server_info = servers[server_name]
-            channels = getattr(server_info, 'accessible_channels', {})
-            
-            if not channels:
-                self.bot.answer_callback_query(call.id, "❌ No channels found for this server")
+
+            # Determine monitored channels for this server
+            monitored = [
+                (cid, info)
+                for cid, info in server_info.channels.items()
+                if cid in getattr(self.discord_service, 'monitored_announcement_channels', set())
+            ]
+
+            if not monitored:
+                self.bot.answer_callback_query(call.id, "❌ No monitored channels for this server")
                 return
-            
-            # Get messages from first channel
-            channel_id, channel_info = next(iter(channels.items()))
-            channel_name = getattr(channel_info, 'channel_name', f'Channel_{channel_id}')
-            
-            # Try to get actual messages
-            messages = []
-            if hasattr(self.discord_service, 'get_channel_messages'):
-                messages = self.discord_service.get_channel_messages(channel_id, limit=5)
-            
-            if messages:
-                text = f"📋 Last {len(messages)} messages from {channel_name}:\n\n"
-                for msg in messages:
-                    text += f"• {msg['author']}: {msg['content'][:50]}...\n"
-                    if len(msg['content']) > 50:
-                        text += f"   (full message: {msg['content']})\n"
-                
-                markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"server_{server_name}"))
-                
-                self.bot.edit_message_text(
-                    text,
-                    call.message.chat.id,
-                    call.message.message_id,
-                    reply_markup=markup,
-                    parse_mode=None
-                )
-            else:
-                self.bot.answer_callback_query(
-                    call.id,
-                    f"ℹ️ No recent messages found in {channel_name}"
-                )
+
+            text_lines = [f"📋 Last messages for **{escape_markdown(server_name)}**:\n"]
+
+            for cid, cinfo in monitored:
+                channel_name = escape_markdown(getattr(cinfo, 'channel_name', f'Channel_{cid}'))
+
+                messages = []
+                if hasattr(self.discord_service, 'get_channel_messages'):
+                    messages = self.discord_service.get_channel_messages(cid, limit=2)
+
+                if messages:
+                    text_lines.append(f"*{channel_name}*:")
+                    for msg in messages:
+                        preview = escape_markdown(msg['content'][:50])
+                        text_lines.append(f"• {escape_markdown(msg['author'])}: {preview}")
+                else:
+                    text_lines.append(f"*{channel_name}*: _no recent messages_")
+
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"server_{server_name}"))
+
+            self.bot.edit_message_text(
+                "\n".join(text_lines),
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
             
         except Exception as e:
             self.logger.error(f"Error getting messages: {e}")
@@ -1873,10 +1885,10 @@ class TelegramService:
             
             self.bot.edit_message_text(
                 f"{status_icon} **Channel Addition Result**\n\n"
-                f"Server: {server_name}\n"
+                f"Server: {escape_markdown(server_name)}\n"
                 f"Channel ID: `{channel_id}`\n"
-                f"Channel Name: {channel_name}\n\n"
-                f"Result: {message}",
+                f"Channel Name: {escape_markdown(channel_name)}\n\n"
+                f"Result: {escape_markdown(message)}",
                 call.message.chat.id,
                 call.message.message_id,
                 reply_markup=markup,
@@ -2234,9 +2246,9 @@ class TelegramService:
             # Показываем финальное подтверждение
             text = (
                 f"🗑️ **Confirm Channel Removal**\n\n"
-                f"**Server:** {server_name}\n"
-                f"**Channel:** {channel_name}\n"
-                f"**Type:** {channel_type.title()}\n"
+                f"**Server:** {escape_markdown(server_name)}\n"
+                f"**Channel:** {escape_markdown(channel_name)}\n"
+                f"**Type:** {escape_markdown(channel_type.title())}\n"
                 f"**Channel ID:** `{channel_id}`\n\n"
                 f"⚠️ **This will:**\n"
                 f"• Stop monitoring this channel\n"
@@ -2301,10 +2313,10 @@ class TelegramService:
             
             self.bot.edit_message_text(
                 f"{status_icon} {result_text}\n\n"
-                f"**Server:** {server_name}\n"
-                f"**Channel:** {channel_name}\n"
+                f"**Server:** {escape_markdown(server_name)}\n"
+                f"**Channel:** {escape_markdown(channel_name)}\n"
                 f"**Channel ID:** `{channel_id}`\n\n"
-                f"**Result:** {message}",
+                f"**Result:** {escape_markdown(message)}",
                 call.message.chat.id,
                 call.message.message_id,
                 reply_markup=markup,
