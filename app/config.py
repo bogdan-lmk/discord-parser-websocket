@@ -76,7 +76,7 @@ class Settings(BaseSettings):
 
     # Channel Configuration
     channel_keywords: List[str] = Field(
-        default=['announcement', 'announcements', 'announce'],
+        default=['announcement', 'announcements', 'announce', 'updates', 'news'],
         description="Keywords to identify announcement channels"
     )
     
@@ -391,4 +391,3 @@ def debug_current_settings():
     
     return settings
 
-# Не используем @lru_cache() по умолчанию - это было источником проблемы!

@@ -134,6 +134,28 @@ class MessageProcessor:
         # Set Discord service reference for channel management
         try:
             self.telegram_service.set_discord_service(self.discord_service)
+            try:
+                self.telegram_service.set_discord_service(self.discord_service)
+                
+                # ПРИНУДИТЕЛЬНОЕ создание топиков для всех серверов
+                if hasattr(self.telegram_service, 'create_topics_for_all_servers'):
+                    created_topics = await self.telegram_service.create_topics_for_all_servers()
+                    
+                    server_count = len(self.discord_service.servers)
+                    topic_count = len(created_topics)
+                    
+                    self.logger.info(f"Topic creation results:")
+                    self.logger.info(f"  Servers: {server_count}")
+                    self.logger.info(f"  Topics created: {topic_count}")
+                    
+                    if topic_count < server_count:
+                        missing = server_count - topic_count
+                        self.logger.warning(f"  Missing topics: {missing}")
+                    else:
+                        self.logger.info(f"  Perfect coverage: ALL servers have topics")
+                    
+            except Exception as e:
+                self.logger.error(f"Error in topic creation: {e}")
             self.logger.info("✅ Discord-Telegram service integration established")
         except Exception as e:
             self.logger.error("❌ Error setting Discord service reference", error=str(e))
@@ -323,7 +345,7 @@ class MessageProcessor:
         ]
         
         # More relaxed limits for WebSocket real-time messages
-        limit = 60 if is_realtime else 30
+        limit = 90 if is_realtime else 60
         
         return len(self.message_rate_tracker[server_name]) < limit
     

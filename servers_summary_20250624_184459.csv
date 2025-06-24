@@ -1,0 +1,48 @@
+server_name,guild_id,status,total_channels,accessible_channels,monitored_channels,announcement_channels,has_topic,topic_id,topic_valid,issues_count
+Sonic Labs,582931087005843466,ServerStatus.ACTIVE,2,1,1,2,False,,False,2
+Superfluid,752490247643725875,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+Enso,805844470624813056,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Burnt (XION),823953904512401469,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+Huddle01,890224574761926756,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+tea,906608167901876256,ServerStatus.ACTIVE,2,1,1,2,False,,False,2
+Sui,916379725201563759,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+Bless,929539044742938634,ServerStatus.ACTIVE,5,1,1,5,False,,False,2
+Botanix,937915188903018498,ServerStatus.ACTIVE,3,3,3,3,False,,False,2
+Naoris Protocol,938790786479296512,ServerStatus.ACTIVE,5,4,4,5,False,,False,2
+Momentum,948033443483254845,ServerStatus.ACTIVE,3,2,2,3,False,,False,2
+Arcium,963285822327652403,ServerStatus.ACTIVE,3,2,2,3,False,,False,2
+Linera,984941796272521226,ServerStatus.ACTIVE,3,2,2,3,False,,False,2
+Backpack,985994296337498182,ServerStatus.ACTIVE,5,1,1,5,False,,False,2
+Eclipse,1020496431959785503,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+ODX,1022525841839755284,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+Monad,1036357772826120242,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+anoma,1066238858632642560,ServerStatus.ACTIVE,3,2,2,3,False,,False,2
+Succinct,1085300494408355901,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+Open Campus,1088034981814738995,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+PARADEX,1107916848193863740,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Mavryk Network,1141663924815671337,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+XRPL EVM,1143643230492168274,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Inco,1150292382416392315,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Moai Finance,1174206838238101604,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Plume,1177250613344612443,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+Yala,1181491386441281546,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Karak,1184489546814066748,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Variational,1196857788220067943,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Mango Network,1199663960392224769,ServerStatus.ACTIVE,5,1,1,5,False,,False,2
+Humanity Protocol,1201822428880437319,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Hemi,1202677849887080508,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Somnia,1209923224620761088,ServerStatus.ACTIVE,5,2,2,5,False,,False,2
+0G,1210423309808963594,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+Fraction AI,1226860543529451561,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+zkVerify,1232391451917422743,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Soneium Gateway,1237722128187658280,ServerStatus.ACTIVE,3,3,3,3,False,,False,2
+ZenChain,1243030097259397130,ServerStatus.ACTIVE,4,2,2,4,False,,False,2
+Abstract,1248792620067721256,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+Shape ⚫,1259842667513118730,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Cytonic,1271111313120165890,ServerStatus.ACTIVE,3,1,1,3,False,,False,2
+OpenLedger,1281511866190925867,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Nexus,1282932921346428979,ServerStatus.ACTIVE,2,1,1,2,False,,False,2
+Recall,1321243373226561600,ServerStatus.ACTIVE,5,3,3,5,False,,False,2
+NodeGo.AI,1335195624928313425,ServerStatus.ACTIVE,2,2,2,2,False,,False,2
+Flow3 Network,1344229603182510090,ServerStatus.ACTIVE,1,1,1,1,False,,False,2
+Dubhe Engine,1356806645841133671,ServerStatus.ACTIVE,2,1,1,2,False,,False,2

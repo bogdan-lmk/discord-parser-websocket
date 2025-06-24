@@ -2,7 +2,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 from threading import Lock
 import structlog
 import telebot
@@ -71,54 +71,55 @@ class TelegramService:
                 return True
         return False
     
-    def _initialize_bot(self):
-        """Правильная инициализация бота с улучшенной обработкой ошибок"""
+    def _initialize_bot(self) -> bool:
+        """Initialize Telegram bot"""
         try:
             if not self.settings.telegram_bot_token:
                 self.logger.error("Telegram bot token not provided")
-                self.bot = None
-                return False
-                
-            # Проверяем формат токена
-            token_parts = self.settings.telegram_bot_token.split(':')
-            if len(token_parts) != 2 or not token_parts[0].isdigit():
-                self.logger.error("Invalid Telegram bot token format", 
-                                token_preview=f"{self.settings.telegram_bot_token[:10]}...")
-                self.bot = None
                 return False
             
             self.bot = telebot.TeleBot(
                 self.settings.telegram_bot_token,
-                skip_pending=True,
-                threaded=False,  # ИСПРАВЛЕНИЕ: Отключаем threading для стабильности
                 parse_mode=None,
-                num_threads=1  # ИСПРАВЛЕНИЕ: Минимальное количество потоков
+                threaded=False
             )
             
-            # Проверяем бота
-            try:
-                bot_info = self.bot.get_me()
-                self.logger.info("Telegram bot initialized successfully", 
-                                bot_username=bot_info.username,
-                                bot_id=bot_info.id,
-                                bot_name=bot_info.first_name)
-            except Exception as e:
-                self.logger.error(f"Bot validation failed: {e}")
-                self.bot = None
-                return False
-            
-            # Устанавливаем обработчики
+            # Setup handlers after bot initialization
             self._setup_bot_handlers()
             
-            self.logger.info("Telegram bot initialized successfully with enhanced error handling")
+            self.logger.info("Telegram bot initialized successfully")
             return True
-                        
+            
         except Exception as e:
-            self.logger.error("Failed to initialize Telegram bot", 
-                            error=str(e),
-                            error_type=type(e).__name__)
+            self.logger.error(f"Failed to initialize Telegram bot: {e}")
             self.bot = None
             return False
+    
+    async def initialize(self) -> bool:
+            """Initialize with immediate topic creation for all servers"""
+            try:
+                if not self.bot:
+                    return False
+                
+                bot_info = self.bot.get_me()
+                
+                if await self._verify_chat_access():
+                    await self.startup_topic_verification()
+                    
+                    # НОВОЕ: Создать топики для всех серверов сразу после инициализации
+                    if self.discord_service and hasattr(self.discord_service, 'servers'):
+                        servers = getattr(self.discord_service, 'servers', {})
+                        if servers:
+                            created_topics = await self.create_topics_for_all_servers()
+                            if created_topics:
+                                self.logger.info(f"Created {len(created_topics)} topics during initialization")
+                    
+                    return True
+                else:
+                    return False
+                    
+            except Exception as e:
+                return False
     
     def _setup_bot_handlers(self):
         """Настройка обработчиков бота"""
@@ -431,15 +432,63 @@ class TelegramService:
                 self.logger.error(f"Error cleaning topics: {e}")
                 self.bot.reply_to(message, f"❌ Error cleaning topics: {e}")
         
+        @self.bot.message_handler(commands=['force_create_all_topics'])
+        def force_create_all_topics_command(message):
+            """Принудительное создание топиков для всех серверов"""
+            try:
+                if message.chat.id != self.settings.telegram_chat_id:
+                    return
+                
+                def sync_create_all_topics():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        created_topics = loop.run_until_complete(self.create_topics_for_all_servers())
+                        return created_topics
+                    finally:
+                        loop.close()
+                
+                # Получаем количество серверов
+                server_count = len(getattr(self.discord_service, 'servers', {})) if self.discord_service else 0
+                
+                self.bot.reply_to(message, f"🔨 Создание топиков для {server_count} серверов...")
+                
+                created_topics = sync_create_all_topics()
+                topic_count = len(created_topics)
+                
+                result_text = (
+                    f"🎯 **Результаты создания топиков:**\n\n"
+                    f"📊 Серверов найдено: {server_count}\n"
+                    f"✅ Топиков создано: {topic_count}\n"
+                )
+                
+                if topic_count == server_count:
+                    result_text += f"🎉 **ИДЕАЛЬНО!** Все серверы имеют топики!\n"
+                else:
+                    missing = server_count - topic_count
+                    result_text += f"⚠️ Не удалось создать: {missing} топиков\n"
+                
+                result_text += f"\n📋 **Созданные топики:**\n"
+                for server_name, topic_id in list(created_topics.items())[:10]:  # Показываем первые 10
+                    result_text += f"• {server_name}: {topic_id}\n"
+                
+                if len(created_topics) > 10:
+                    result_text += f"• ... и ещё {len(created_topics) - 10} топиков\n"
+                
+                result_text += f"\n🛡️ Анти-дублирование: **АКТИВНО**"
+                
+                self.bot.reply_to(message, result_text, parse_mode='Markdown')
+                
+            except Exception as e:
+                self.logger.error(f"Error in force_create_all_topics command: {e}")
+                self.bot.reply_to(message, f"❌ Ошибка: {str(e)}")
         self.logger.info("Bot handlers setup completed successfully")
     
-    #  2: Заменить метод set_discord_service в TelegramService
 
     def set_discord_service(self, discord_service):
         """Set Discord service reference for enhanced channel management"""
         self.discord_service = discord_service
         
-        # Устанавливаем обратную ссылку правильно
         if hasattr(discord_service, 'telegram_service_ref'):
             discord_service.telegram_service_ref = self
         
@@ -458,114 +507,102 @@ class TelegramService:
             self.logger.info(f"Available servers: {len(getattr(discord_service, 'servers', {}))}")
             self.logger.info(f"Monitored channels: {len(getattr(discord_service, 'monitored_announcement_channels', set()))}")
     
-    async def initialize(self) -> bool:
-        """Initialize Enhanced Telegram service with startup verification"""
+    async def create_topics_for_all_servers(self) -> Dict[str, int]:
+        """Create topics for ALL servers immediately"""
+        if not self.discord_service:
+            return {}
+        
+        servers = getattr(self.discord_service, 'servers', {})
+        if not servers:
+            return {}
+        
+        if not self._check_if_supergroup_with_topics(self.settings.telegram_chat_id):
+            return {}
+        
+        created_topics = {}
+        
+        for server_name in servers.keys():
+            try:
+                # Проверяем есть ли уже топик
+                if server_name in self.server_topics:
+                    topic_id = self.server_topics[server_name]
+                    if await self._topic_exists(self.settings.telegram_chat_id, topic_id):
+                        created_topics[server_name] = topic_id
+                        continue
+                    else:
+                        del self.server_topics[server_name]
+                
+                # Создаем новый топик
+                topic_id = await self._create_topic_immediately(server_name)
+                if topic_id:
+                    created_topics[server_name] = topic_id
+                    
+            except Exception as e:
+                continue
+        
+        self._save_persistent_data()
+        return created_topics
+    
+    async def _create_topic_immediately(self, server_name: str) -> Optional[int]:
+        """Create topic immediately without locks"""
         try:
-            if not self.bot:
-                self.logger.error("Bot not initialized")
-                return False
+            topic_name = f"{server_name}"
             
-            # Test bot token and permissions
-            bot_info = self.bot.get_me()
-            self.logger.info("Enhanced Telegram bot initialized", 
-                           bot_username=bot_info.username,
-                           bot_id=bot_info.id,
-                           features=["Anti-duplicate topics", "Channel management", "Interactive UI"])
+            topic = self.bot.create_forum_topic(
+                chat_id=self.settings.telegram_chat_id,
+                name=topic_name,
+                icon_color=0x6FB9F0
+            )
             
-            # Verify chat access and topic support
-            if await self._verify_chat_access():
-                self.logger.info("Chat access verified with topic support", 
-                               chat_id=self.settings.telegram_chat_id)
-                
-                #  Startup topic verification to prevent duplicates
-                await self.startup_topic_verification()
-                
-                return True
-            else:
-                self.logger.error("Cannot access Telegram chat or topics not supported", 
-                                chat_id=self.settings.telegram_chat_id)
-                return False
+            topic_id = topic.message_thread_id
+            
+            # Проверяем что топик создан
+            if await self._topic_exists(self.settings.telegram_chat_id, topic_id):
+                self.server_topics[server_name] = topic_id
+                self.topic_name_cache[topic_id] = server_name
+                return topic_id
                 
         except Exception as e:
-            self.logger.error("Enhanced Telegram service initialization failed", error=str(e))
-            return False
+            pass
+        
+        return None
     
     async def startup_topic_verification(self) -> None:
-        """ Startup verification to prevent duplicate topics"""
+        """Startup verification + создание топиков для всех серверов"""
         if self.startup_verification_done:
             return
             
         async with self.topic_sync_lock:
-            if self.startup_verification_done:  # Double-check
+            if self.startup_verification_done:
                 return
                 
-            self.logger.info("🔍 Starting enhanced topic verification to prevent duplicates...")
-            
             try:
                 chat_id = self.settings.telegram_chat_id
                 
                 if not self._check_if_supergroup_with_topics(chat_id):
-                    self.logger.info("Chat doesn't support topics, verification skipped")
                     self.startup_verification_done = True
                     return
                 
-                # Verify existing topics and remove duplicates
-                existing_valid_topics = {}
+                # Проверяем существующие топики
                 invalid_topics = []
-                
                 for server_name, topic_id in list(self.server_topics.items()):
-                    if await self._topic_exists(chat_id, topic_id):
-                        topic_name = f"{server_name}"
-                        
-                        # Check for duplicates by name
-                        if topic_name in existing_valid_topics:
-                            # Found duplicate! Close the old one
-                            old_topic_id = existing_valid_topics[topic_name]
-                            self.logger.warning(f"🗑️ Duplicate topic found: keeping {topic_id}, closing {old_topic_id}")
-                            
-                            try:
-                                self.bot.close_forum_topic(chat_id=chat_id, message_thread_id=old_topic_id)
-                                self.logger.info(f"🔒 Closed duplicate topic {old_topic_id}")
-                            except Exception as e:
-                                self.logger.warning(f"Could not close duplicate topic {old_topic_id}: {e}")
-                            
-                            # Remove old from cache
-                            for srv_name, srv_topic_id in list(self.server_topics.items()):
-                                if srv_topic_id == old_topic_id:
-                                    del self.server_topics[srv_name]
-                                    break
-                        
-                        existing_valid_topics[topic_name] = topic_id
-                        
-                    else:
-                        # Topic doesn't exist
+                    if not await self._topic_exists(chat_id, topic_id):
                         invalid_topics.append(server_name)
                 
-                # Remove invalid topics from cache
+                # Удаляем недействительные топики
                 for server_name in invalid_topics:
                     if server_name in self.server_topics:
-                        old_topic_id = self.server_topics[server_name]
                         del self.server_topics[server_name]
-                        self.logger.info(f"🗑️ Removed invalid topic: {server_name} -> {old_topic_id}")
+                        if self.server_topics.get(server_name) in self.topic_name_cache:
+                            del self.topic_name_cache[self.server_topics[server_name]]
                 
-                # Recreate topic name cache
-                self.topic_name_cache = {v: k for k, v in self.server_topics.items()}
-                
-                # Save changes
-                if invalid_topics or len(existing_valid_topics) != len(self.server_topics):
-                    self._save_persistent_data()
-                
-                self.logger.info(f"✅ Enhanced topic verification complete:",
-                               extra={
-                                   "valid_topics": len(self.server_topics),
-                                   "removed_invalid": len(invalid_topics),
-                                   "duplicate_protection": "ACTIVE"
-                               })
+                # НОВОЕ: Создаем топики для всех серверов
+                if self.discord_service:
+                    await self.create_topics_for_all_servers()
                 
                 self.startup_verification_done = True
                 
             except Exception as e:
-                self.logger.error(f"❌ Error during startup verification: {e}")
                 self.startup_verification_done = True
     
     def _check_if_supergroup_with_topics(self, chat_id: int) -> bool:
@@ -861,44 +898,6 @@ class TelegramService:
         except Exception as e:
             self.logger.error(f"Error in servers pagination: {e}")
             self.bot.answer_callback_query(call.id, "❌ Pagination error") 
-    
-    async def _fetch_all_guilds_from_all_tokens(self) -> List[dict]:
-        """Получить ВСЕ гильдии со всех доступных токенов"""
-        all_guilds = []
-        seen_guild_ids = set()
-        
-        self.logger.info(f"🔍 Fetching guilds from {len(self.sessions)} tokens...")
-        
-        # Создаем задачи для всех токенов
-        fetch_tasks = []
-        for i, session in enumerate(self.sessions):
-            task = self._fetch_guilds_from_single_token(session, i)
-            fetch_tasks.append(task)
-        
-        # Выполняем запросы параллельно
-        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-        
-        # Объединяем результаты, убирая дубликаты
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                self.logger.error(f"❌ Token {i} failed to fetch guilds: {result}")
-                continue
-            
-            if not result:
-                self.logger.warning(f"⚠️ Token {i} returned no guilds")
-                continue
-                
-            self.logger.info(f"✅ Token {i}: {len(result)} guilds found")
-            
-            for guild in result:
-                guild_id = guild.get('id')
-                if guild_id and guild_id not in seen_guild_ids:
-                    seen_guild_ids.add(guild_id)
-                    guild['_source_token'] = i  # Помечаем источник
-                    all_guilds.append(guild)
-        
-        self.logger.info(f"📊 Total unique guilds collected: {len(all_guilds)} from {len(self.sessions)} tokens")
-        return all_guilds
     
     
     
@@ -1207,7 +1206,7 @@ class TelegramService:
     
 
 
-    def add_channel_to_server(self, server_name: str, channel_id: str, channel_name: str = None) -> tuple[bool, str]:
+    def add_channel_to_server(self, server_name: str, channel_id: str, channel_name: str = None) -> Tuple[bool, str]:
         """Add any channel to a server and enable monitoring"""
         try:
             self.logger.info(f"Adding channel to server: {server_name}, channel_id: {channel_id}, name: {channel_name}")
@@ -1347,7 +1346,7 @@ class TelegramService:
             self.logger.error(f"Error adding channel to server: {e}")
             return False, f"Error adding channel: {str(e)}"
     
-    def remove_channel_from_server(self, server_name: str, channel_id: str) -> tuple[bool, str]:
+    def remove_channel_from_server(self, server_name: str, channel_id: str) -> Tuple[bool, str]:
         """Удалить канал из мониторинга сервера"""
         try:
             self.logger.info(f"Removing channel from monitoring: server={server_name}, channel_id={channel_id}")
@@ -1736,67 +1735,7 @@ class TelegramService:
             
         except Exception as e:
             self.logger.error(f"Error showing all removable channels: {e}")
-
-    def get_channel_management_summary(self, server_name: str) -> Dict:
-        """Получить сводку по управлению каналами для API"""
-        try:
-            if not self.discord_service or server_name not in getattr(self.discord_service, 'servers', {}):
-                return {"error": "Server not found"}
-            
-            server_info = self.discord_service.servers[server_name]
-            channels = getattr(server_info, 'accessible_channels', {})
-            
-            # Анализируем каналы
-            monitored_channels = []
-            unmonitored_channels = []
-            
-            for channel_id, channel_info in channels.items():
-                channel_data = {
-                    "channel_id": channel_id,
-                    "channel_name": channel_info.channel_name,
-                    "is_announcement": self._is_announcement_channel(channel_info.channel_name),
-                    "accessible": channel_info.http_accessible,
-                    "message_count": getattr(channel_info, 'message_count', 0)
-                }
-                
-                if channel_id in self.discord_service.monitored_announcement_channels:
-                    channel_data["monitored"] = True
-                    channel_data["can_remove"] = True
-                    monitored_channels.append(channel_data)
-                else:
-                    channel_data["monitored"] = False
-                    channel_data["can_add"] = True
-                    unmonitored_channels.append(channel_data)
-            
-            # Статистика
-            announcement_monitored = len([ch for ch in monitored_channels if ch["is_announcement"]])
-            regular_monitored = len(monitored_channels) - announcement_monitored
-            
-            return {
-                "server_name": server_name,
-                "telegram_topic_id": self.server_topics.get(server_name),
-                "monitoring_summary": {
-                    "total_channels": len(server_info.channels),
-                    "accessible_channels": len(channels),
-                    "monitored_channels": len(monitored_channels),
-                    "unmonitored_channels": len(unmonitored_channels),
-                    "announcement_monitored": announcement_monitored,
-                    "regular_monitored": regular_monitored
-                },
-                "monitored_channels": monitored_channels,
-                "unmonitored_channels": unmonitored_channels,
-                "management_options": {
-                    "can_add_channels": len(unmonitored_channels) > 0,
-                    "can_remove_channels": len(monitored_channels) > 0,
-                    "max_channels": getattr(server_info, 'max_channels', 5),
-                    "current_usage": len(server_info.channels)
-                }
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Error getting channel management summary: {e}")
-            return {"error": str(e)}
-        
+  
     def _handle_get_messages(self, call):
         """Handle get messages request with actual message retrieval"""
         try:
@@ -2733,6 +2672,8 @@ class TelegramService:
         
         return "\n".join(parts)
     
+    
+            
     async def _clean_invalid_topics(self) -> int:
         """Enhanced topic cleanup with duplicate detection"""
         invalid_topics = []
