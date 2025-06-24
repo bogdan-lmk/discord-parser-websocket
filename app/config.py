@@ -100,20 +100,56 @@ class Settings(BaseSettings):
     @field_validator('discord_auth_tokens')
     @classmethod
     def validate_discord_tokens(cls, v):
-        """Validate Discord tokens with relaxed validation"""
+        """Валидация пользовательских Discord токенов (не bot токенов)"""
         if isinstance(v, str):
-            tokens = [token.strip() for token in v.split(',') if token.strip()]
+            # Разделяем токены по запятым и очищаем
+            tokens = []
+            for token in v.split(','):
+                clean_token = token.strip()
+                if clean_token:  # Пропускаем пустые токены
+                    # Убираем префикс "Bot " если кто-то случайно добавил
+                    if clean_token.startswith('Bot '):
+                        clean_token = clean_token[4:].strip()
+                        print(f"⚠️ Удален префикс 'Bot ' из токена - используются пользовательские токены")
+                    
+                    if clean_token:
+                        tokens.append(clean_token)
         else:
             tokens = v if isinstance(v, list) else []
-            
+        
         if not tokens or len(tokens) == 0:
-            raise ValueError('At least one Discord token is required')
+            raise ValueError('At least one Discord user token is required')
         
         for i, token in enumerate(tokens):
-            if not token or len(token.strip()) < 20:  # Relaxed minimum length
-                raise ValueError(f'Invalid Discord token format at position {i+1}: token too short')
+            if not token or len(token.strip()) < 50:
+                raise ValueError(f'Invalid Discord user token at position {i+1}: token too short (expected 70+ characters)')
+            
+            # Пользовательские Discord токены обычно начинаются с определенных префиксов
+            # и имеют другой формат чем bot токены
+            
+            # Проверяем что это не явно bot токен (они имеют 3 части через точки)
+            if '.' in token and len(token.split('.')) == 3:
+                # Это может быть bot токен, предупреждаем
+                try:
+                    import base64
+                    parts = token.split('.')
+                    decoded = base64.b64decode(parts[0] + '===')
+                    if decoded.decode('utf-8').isdigit():
+                        raise ValueError(f'Token at position {i+1} appears to be a bot token. Please use user tokens instead.')
+                except:
+                    pass  # Если не удалось декодировать, продолжаем
+            
+            # Базовая проверка длины и символов
+            if len(token) < 50 or len(token) > 100:
+                raise ValueError(f'Invalid token length at position {i+1}: expected 50-100 characters, got {len(token)}')
+            
+            # Проверяем что токен содержит только допустимые символы
+            allowed_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.')
+            if not all(c in allowed_chars for c in token):
+                raise ValueError(f'Token at position {i+1} contains invalid characters')
         
-        return v
+        # Возвращаем очищенные токены как строку
+        return ','.join(tokens)
     
     @field_validator('telegram_chat_id')
     @classmethod

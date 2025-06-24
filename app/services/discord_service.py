@@ -118,27 +118,56 @@ class DiscordService:
         return False
     
     async def initialize(self) -> bool:
-        """Initialize Discord service"""
+        """Инициализация Discord service с пользовательскими токенами"""
         if self._initialization_done:
             return True
             
-        self.logger.info("Initializing Discord service with WebSocket monitoring", 
+        self.logger.info("Initializing Discord service with USER TOKENS (not bot tokens)", 
                         token_count=len(self.settings.discord_tokens),
                         max_servers=self.settings.max_servers,
-                        max_channels_total=self.settings.max_total_channels)
+                        max_channels_total=self.settings.max_total_channels,
+                        token_type="USER_TOKEN")
         
-        # Create sessions and get gateway URLs
+        # Очищаем старые данные
+        self.sessions.clear()
+        self.gateway_urls.clear()
+        self.token_failure_counts.clear()
+        
+        # Создаем сессии для пользовательских токенов
         successful_tokens = 0
-        for i, token in enumerate(self.settings.discord_tokens):
+        for i, raw_token in enumerate(self.settings.discord_tokens):
+            # Очищаем токен
+            clean_token = raw_token.strip()
+            
+            # Убираем префикс "Bot " если кто-то случайно добавил
+            if clean_token.startswith('Bot '):
+                clean_token = clean_token[4:].strip()
+                self.logger.warning(f"Removed 'Bot ' prefix from user token {i+1}")
+            
+            self.logger.info(f"Initializing user token {i+1}/{len(self.settings.discord_tokens)}", 
+                            token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
+                            token_type="USER_TOKEN")
+            
+            # Создаем сессию с заголовками для пользовательского токена
             session = aiohttp.ClientSession(
                 headers={
-                    'Authorization': f'Bot {token}' if not token.startswith('Bot ') else token,
-                    'User-Agent': 'DiscordBot (Discord-Parser-MVP, 1.0)'
+                    'Authorization': clean_token,  # БЕЗ префикса "Bot"
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Content-Type': 'application/json',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'X-Super-Properties': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI0MjAyMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
                 },
                 timeout=aiohttp.ClientTimeout(total=30, connect=10),
                 connector=aiohttp.TCPConnector(
                     limit=20,
-                    limit_per_host=5,
+                    limit_per_host=3,  # Меньше соединений для пользовательских токенов
                     ttl_dns_cache=300,
                     use_dns_cache=True
                 )
@@ -148,44 +177,77 @@ class DiscordService:
                 self.sessions.append(session)
                 self.token_failure_counts[i] = 0
                 successful_tokens += 1
-                self.logger.info("Token validated and gateway obtained", token_index=i)
+                self.logger.info("User token validated successfully", 
+                            token_index=i,
+                            successful_count=successful_tokens)
             else:
                 await session.close()
-                self.logger.error("Token validation or gateway retrieval failed", token_index=i)
+                self.logger.error("User token validation failed", 
+                                token_index=i,
+                                token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
+                                help="Check token validity and ensure it's a user token, not a bot token")
         
         if not self.sessions:
-            self.logger.error("No valid Discord tokens available")
+            self.logger.error("No valid Discord user tokens available")
+            self.logger.error("Please check your Discord USER tokens in .env file")
+            self.logger.error("Note: Use user tokens, NOT bot tokens")
+            self.logger.error("Run 'python debug_user_tokens.py' for detailed diagnostics")
             return False
         
-        # Discover announcement channels
-        await self._discover_announcement_channels_only()
+        self.logger.info(f"Successfully initialized {successful_tokens}/{len(self.settings.discord_tokens)} user tokens")
+        
+        # Поиск announcement каналов
+        try:
+            await self._discover_announcement_channels_only()
+        except Exception as e:
+            self.logger.warning("Error during channel discovery", error=str(e))
+            # Продолжаем работу даже если не удалось найти каналы
         
         self._initialization_done = True
-        self.logger.info("Discord service initialized with WebSocket support", 
+        self.logger.info("Discord service initialized with USER TOKENS", 
                         valid_tokens=len(self.sessions),
                         servers_found=len(self.servers),
                         announcement_channels=len(self.monitored_announcement_channels),
-                        gateway_urls=len(self.gateway_urls))
+                        gateway_urls=len(self.gateway_urls),
+                        token_type="USER_TOKEN",
+                        note="Using Discord user tokens, not bot tokens")
         return True
     
     async def _validate_token_and_get_gateway(self, session: aiohttp.ClientSession, token_index: int) -> bool:
-        """Validate token and get gateway URL"""
+        """Валидация пользовательского Discord токена (не bot токена)"""
+        token = self.settings.discord_tokens[token_index]
+        
+        # Очищаем токен от лишних пробелов
+        clean_token = token.strip()
+        
+        # Для пользовательских токенов НЕ добавляем префикс "Bot"
+        # Используем токен как есть
+        auth_header = clean_token
+        
+        # Обновляем заголовки сессии для пользовательского токена
+        session.headers.update({
+            'Authorization': auth_header,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Content-Type': 'application/json',
+            'X-Super-Properties': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI0MjAyMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
+        })
+        
         for attempt in range(self.max_retries):
             try:
                 if attempt > 0:
                     delay = min(self.max_delay, self.base_delay * (2 ** attempt))
                     await asyncio.sleep(delay)
                 
-                await self.rate_limiter.wait_if_needed(f"token_validate_{token_index}")
+                await self.rate_limiter.wait_if_needed(f"user_token_validate_{token_index}")
                 
-                # Validate token
-                async with session.get('https://discord.com/api/v10/users/@me') as response:
+                # Проверяем пользовательский токен
+                async with session.get('https://discord.com/api/v9/users/@me') as response:
                     if response.status == 429:
                         retry_after = float(response.headers.get('Retry-After', 60))
-                        self.logger.warning("Rate limited during token validation", 
-                                          token_index=token_index,
-                                          retry_after=retry_after,
-                                          attempt=attempt + 1)
+                        self.logger.warning("Rate limited during user token validation", 
+                                        token_index=token_index,
+                                        retry_after=retry_after,
+                                        attempt=attempt + 1)
                         
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(min(retry_after, 60))
@@ -193,8 +255,19 @@ class DiscordService:
                         else:
                             return False
                     
+                    if response.status == 401:
+                        error_data = await response.text()
+                        self.logger.error("User token validation failed - Unauthorized", 
+                                        token_index=token_index,
+                                        status=response.status,
+                                        error_details=error_data[:200],
+                                        token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
+                                        attempt=attempt + 1,
+                                        note="This is a user token, not a bot token")
+                        return False
+                    
                     if response.status != 200:
-                        self.logger.error("Token validation failed", 
+                        self.logger.error("User token validation failed", 
                                         token_index=token_index,
                                         status=response.status,
                                         attempt=attempt + 1)
@@ -205,12 +278,15 @@ class DiscordService:
                         continue
                     
                     user_data = await response.json()
-                    self.logger.info("Token valid for user", 
-                                   username=user_data.get('username'),
-                                   token_index=token_index)
+                    self.logger.info("User token valid", 
+                                username=user_data.get('username'),
+                                user_id=user_data.get('id'),
+                                discriminator=user_data.get('discriminator'),
+                                token_index=token_index,
+                                token_type="USER_TOKEN")
                 
-                # Get gateway URL
-                async with session.get('https://discord.com/api/v10/gateway/bot') as gateway_response:
+                # Для пользовательских токенов используем обычный gateway (не bot gateway)
+                async with session.get('https://discord.com/api/v9/gateway') as gateway_response:
                     if gateway_response.status == 429:
                         retry_after = float(gateway_response.headers.get('Retry-After', 60))
                         if attempt < self.max_retries - 1:
@@ -220,9 +296,11 @@ class DiscordService:
                             return False
                     
                     if gateway_response.status != 200:
-                        self.logger.error("Gateway URL retrieval failed", 
+                        error_data = await gateway_response.text()
+                        self.logger.error("Gateway URL retrieval failed for user token", 
                                         token_index=token_index,
-                                        status=gateway_response.status)
+                                        status=gateway_response.status,
+                                        error_details=error_data[:200])
                         if gateway_response.status in [401, 403]:
                             return False
                         continue
@@ -235,13 +313,12 @@ class DiscordService:
                         continue
                     
                     self.gateway_urls.append(gateway_url)
-                    self.logger.info("Gateway URL obtained", 
-                                   token_index=token_index,
-                                   gateway_url=gateway_url,
-                                   session_limit=gateway_data.get('session_start_limit', {}))
+                    self.logger.info("Gateway URL obtained for user token", 
+                                token_index=token_index,
+                                gateway_url=gateway_url)
                 
-                # Test guild access
-                async with session.get('https://discord.com/api/v10/users/@me/guilds') as guilds_res:
+                # Тест доступа к гильдиям с пользовательским токеном
+                async with session.get('https://discord.com/api/v9/users/@me/guilds') as guilds_res:
                     if guilds_res.status == 429:
                         retry_after = float(guilds_res.headers.get('Retry-After', 60))
                         if attempt < self.max_retries - 1:
@@ -252,25 +329,28 @@ class DiscordService:
                     
                     if guilds_res.status != 200:
                         if guilds_res.status in [401, 403]:
-                            return False
+                            self.logger.warning("Limited guild access with user token", 
+                                            token_index=token_index,
+                                            status=guilds_res.status)
+                            # Для пользовательских токенов ограниченный доступ к гильдиям - это нормально
                         continue
                     
                     guilds = await guilds_res.json()
-                    self.logger.info("Token has access to guilds", 
-                                   guild_count=len(guilds),
-                                   token_index=token_index)
+                    self.logger.info("User token has access to guilds", 
+                                guild_count=len(guilds),
+                                token_index=token_index)
                 
                 self.rate_limiter.record_success()
                 return True
                 
             except asyncio.TimeoutError:
-                self.logger.warning("Token validation timeout", 
-                                  token_index=token_index,
-                                  attempt=attempt + 1)
+                self.logger.warning("User token validation timeout", 
+                                token_index=token_index,
+                                attempt=attempt + 1)
                 self.rate_limiter.record_error()
                 
             except Exception as e:
-                self.logger.error("Token validation error", 
+                self.logger.error("User token validation error", 
                                 token_index=token_index,
                                 error=str(e),
                                 attempt=attempt + 1)
@@ -895,41 +975,68 @@ class DiscordService:
             raise
     
     async def _send_identify(self, connection_info: Dict) -> None:
-        """Send IDENTIFY to Discord Gateway"""
+        """Send IDENTIFY to Discord Gateway для пользовательского токена"""
         ws = connection_info['ws']
         token_index = connection_info['token_index']
         connection_id = f"token_{token_index}"
         
-        # Get token from session headers
-        token = self.settings.discord_tokens[token_index]
-        if not token.startswith('Bot '):
-            token = f'Bot {token}'
+        # Получаем чистый пользовательский токен 
+        token = self.settings.discord_tokens[token_index].strip()
+        if token.startswith('Bot '):
+            token = token[4:].strip()
         
+        # Для пользовательских токенов используем другие параметры
         identify_payload = {
             "op": 2,
             "d": {
-                "token": token,
+                "token": token,  
                 "properties": {
-                    "$os": "linux",
-                    "$browser": "discord-parser-mvp",
-                    "$device": "discord-parser-mvp"
+                    "$os": "Windows",
+                    "$browser": "Chrome", 
+                    "$device": "",
+                    "$system_locale": "en-US",
+                    "$browser_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "$browser_version": "120.0.0.0",
+                    "$os_version": "10",
+                    "$referrer": "",
+                    "$referring_domain": "",
+                    "$referrer_current": "",
+                    "$referring_domain_current": "",
+                    "$release_channel": "stable",
+                    "$client_build_number": 242021,
+                    "$client_event_source": None
                 },
                 "compress": False,
                 "large_threshold": 50,
-                "shard": None,  # No sharding for now
+                "shard": None,  # No sharding
                 "presence": {
                     "status": "online",
+                    "since": 0,
+                    "activities": [],
                     "afk": False
                 },
-                "intents": self.intents  # GUILDS + GUILD_MESSAGES
+                # Для пользовательских токенов используем другие intents или вообще их не указываем
+                "intents": 513,  # GUILDS (1) + GUILD_MESSAGES (512) - базовые права
+                "capabilities": 16381,  # Пользовательские capabilities
+                "client_state": {
+                    "guild_versions": {},
+                    "highest_last_message_id": "0",
+                    "read_state_version": 0,
+                    "user_guild_settings_version": -1,
+                    "user_settings_version": -1,
+                    "private_channels_version": "0",
+                    "api_code_version": 0
+                }
             }
         }
         
         try:
             await ws.send_str(json.dumps(identify_payload))
-            self.logger.info(f"🆔 Sent IDENTIFY for {connection_id}", intents=self.intents)
+            self.logger.info(f"🆔 Sent IDENTIFY for user token {connection_id}", 
+                            token_type="USER_TOKEN",
+                            intents=identify_payload["d"]["intents"])
         except Exception as e:
-            self.logger.error(f"❌ Failed to send IDENTIFY for {connection_id}", error=str(e))
+            self.logger.error(f"❌ Failed to send IDENTIFY for user token {connection_id}", error=str(e))
             raise
     
     async def _send_resume(self, connection_info: Dict) -> None:
