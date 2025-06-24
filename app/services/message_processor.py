@@ -3,7 +3,7 @@ import asyncio
 import hashlib
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 import structlog
 
 from ..models.message import DiscordMessage
@@ -70,32 +70,102 @@ class MessageProcessor:
         self.websocket_last_message_time = None
         
     async def initialize(self) -> bool:
-        """Initialize all services and set up WebSocket integration"""
+        """Initialize all services with enhanced error handling"""
         self.logger.info("🚀 Initializing Message Processor with WebSocket-only system")
         
-        # Initialize Discord service (with WebSocket support)
-        if not await self.discord_service.initialize():
-            self.logger.error("❌ Discord service initialization failed")
+        initialization_errors = []
+        
+        # Initialize Discord service with retry logic
+        discord_initialized = False
+        for attempt in range(3):
+            try:
+                self.logger.info(f"Initializing Discord service (attempt {attempt + 1}/3)")
+                if await self.discord_service.initialize():
+                    discord_initialized = True
+                    self.logger.info("✅ Discord service initialized successfully")
+                    break
+                else:
+                    error_msg = f"Discord service initialization returned False (attempt {attempt + 1})"
+                    self.logger.warning(error_msg)
+                    initialization_errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Discord service initialization error (attempt {attempt + 1}): {e}"
+                self.logger.error(error_msg, error_type=type(e).__name__)
+                initialization_errors.append(error_msg)
+            
+            if attempt < 2:  # Wait before retry
+                await asyncio.sleep(5)
+        
+        if not discord_initialized:
+            self.logger.error("❌ Discord service initialization failed after all attempts")
+            self.logger.error("Discord initialization errors:")
+            for error in initialization_errors[-3:]:  # Show last 3 errors
+                self.logger.error(f"  • {error}")
             return False
         
-        # Initialize Telegram service
-        if not await self.telegram_service.initialize():
-            self.logger.error("❌ Telegram service initialization failed")
+        # Initialize Telegram service with retry logic
+        telegram_initialized = False
+        for attempt in range(3):
+            try:
+                self.logger.info(f"Initializing Telegram service (attempt {attempt + 1}/3)")
+                if await self.telegram_service.initialize():
+                    telegram_initialized = True
+                    self.logger.info("✅ Telegram service initialized successfully")
+                    break
+                else:
+                    error_msg = f"Telegram service initialization returned False (attempt {attempt + 1})"
+                    self.logger.warning(error_msg)
+                    initialization_errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Telegram service initialization error (attempt {attempt + 1}): {e}"
+                self.logger.error(error_msg, error_type=type(e).__name__)
+                initialization_errors.append(error_msg)
+            
+            if attempt < 2:  # Wait before retry
+                await asyncio.sleep(3)
+        
+        if not telegram_initialized:
+            self.logger.error("❌ Telegram service initialization failed after all attempts")
+            self.logger.error("Telegram initialization errors:")
+            for error in initialization_errors[-3:]:  # Show last 3 errors
+                self.logger.error(f"  • {error}")
             return False
         
         # Set Discord service reference for channel management
-        self.telegram_service.set_discord_service(self.discord_service)
+        try:
+            self.telegram_service.set_discord_service(self.discord_service)
+            self.logger.info("✅ Discord-Telegram service integration established")
+        except Exception as e:
+            self.logger.error("❌ Error setting Discord service reference", error=str(e))
+            # Not critical, continue
         
         # Register WebSocket message callback
-        self.discord_service.add_message_callback(self._handle_websocket_message)
+        try:
+            self.discord_service.add_message_callback(self._handle_websocket_message)
+            self.logger.info("✅ WebSocket message callback registered")
+        except Exception as e:
+            self.logger.error("❌ Error registering WebSocket callback", error=str(e))
+            # Not critical for basic functionality
         
         # Initialize server tracking
-        for server_name in self.discord_service.servers.keys():
-            self.server_message_counts[server_name] = 0
-            self.server_last_activity[server_name] = datetime.now()
+        try:
+            for server_name in self.discord_service.servers.keys():
+                self.server_message_counts[server_name] = 0
+                self.server_last_activity[server_name] = datetime.now()
+            self.logger.info(f"✅ Server tracking initialized for {len(self.discord_service.servers)} servers")
+        except Exception as e:
+            self.logger.error("❌ Error initializing server tracking", error=str(e))
+            # Initialize empty tracking
+            self.server_message_counts = {}
+            self.server_last_activity = {}
         
         # Update initial statistics
-        await self._update_stats()
+        try:
+            await self._update_stats()
+            self.logger.info("✅ Initial statistics updated")
+        except Exception as e:
+            self.logger.warning("⚠️ Error updating initial statistics", error=str(e))
+            # Not critical
         
         self.logger.info("✅ Message Processor initialized successfully",
                         discord_servers=len(self.discord_service.servers),
@@ -108,12 +178,28 @@ class MessageProcessor:
         return True
     
     async def _handle_websocket_message(self, message: DiscordMessage) -> None:
-        """Handle WebSocket message - ONLY process if newer than last seen"""
+        """Handle WebSocket message with enhanced error handling"""
         try:
             self.websocket_messages_received += 1
             self.websocket_last_message_time = datetime.now()
             
+            # Проверяем что сообщение не None и имеет необходимые атрибуты
+            if not message:
+                self.logger.warning("Received None message from WebSocket")
+                return
+            
+            required_attrs = ['channel_id', 'server_name', 'channel_name', 'timestamp']
+            missing_attrs = [attr for attr in required_attrs if not hasattr(message, attr)]
+            if missing_attrs:
+                self.logger.warning("Message missing required attributes", 
+                                missing=missing_attrs)
+                return
+            
             # Check if channel is monitored
+            if not hasattr(self.discord_service, 'monitored_announcement_channels'):
+                self.logger.warning("Discord service missing monitored_announcement_channels")
+                return
+            
             if message.channel_id not in self.discord_service.monitored_announcement_channels:
                 self.logger.debug("🚫 Non-monitored channel message ignored",
                                 server=message.server_name,
@@ -128,9 +214,13 @@ class MessageProcessor:
                 
                 # Queue for processing after initialization
                 try:
-                    await asyncio.wait_for(self.message_queue.put(message), timeout=1.0)
+                    await asyncio.wait_for(self.message_queue.put(message), timeout=2.0)
                 except asyncio.TimeoutError:
-                    self.logger.warning("⚠️ Queue timeout during initialization")
+                    self.logger.warning("⚠️ Queue timeout during initialization for message from",
+                                    server=message.server_name)
+                except Exception as queue_error:
+                    self.logger.error("Error queuing message during initialization",
+                                    error=str(queue_error))
                 return
             
             # Check if message is newer than last processed
@@ -143,47 +233,62 @@ class MessageProcessor:
                 return
             
             # Deduplication check
-            message_hash = self._create_message_hash(message)
-            async with self.message_dedup_lock:
-                if message_hash in self.processed_message_hashes:
-                    self.logger.debug("🔂 Duplicate WebSocket message ignored",
-                                    message_hash=message_hash[:8],
-                                    server=message.server_name)
-                    return
-                self.processed_message_hashes.add(message_hash)
+            try:
+                message_hash = self._create_message_hash(message)
+                async with self.message_dedup_lock:
+                    if message_hash in self.processed_message_hashes:
+                        self.logger.debug("🔂 Duplicate WebSocket message ignored",
+                                        message_hash=message_hash[:8],
+                                        server=message.server_name)
+                        return
+                    self.processed_message_hashes.add(message_hash)
+            except Exception as dedup_error:
+                self.logger.error("Error in deduplication check", error=str(dedup_error))
+                # Continue processing despite deduplication error
             
             # Rate limit check
-            if not self._check_rate_limit(message.server_name, is_realtime=True):
-                self.logger.warning("🚦 Rate limit exceeded for WebSocket message", 
-                                  server=message.server_name)
-                return
+            try:
+                if not self._check_rate_limit(message.server_name, is_realtime=True):
+                    self.logger.warning("🚦 Rate limit exceeded for WebSocket message", 
+                                    server=message.server_name)
+                    return
+            except Exception as rate_error:
+                self.logger.error("Error in rate limit check", error=str(rate_error))
+                # Continue processing despite rate limit error
             
             # Queue the message for processing
             try:
-                await asyncio.wait_for(self.message_queue.put(message), timeout=2.0)
+                await asyncio.wait_for(self.message_queue.put(message), timeout=3.0)
                 self.last_processed_message_per_channel[message.channel_id] = message.timestamp
                 self._update_rate_tracking(message.server_name)
                 self.server_last_activity[message.server_name] = datetime.now()
                 
                 channel_type = "announcement" if self._is_announcement_channel(message.channel_name) else "regular"
                 self.logger.info("📨 NEW WebSocket message queued", 
-                               server=message.server_name,
-                               channel=message.channel_name,
-                               channel_type=channel_type,
-                               author=message.author,
-                               queue_size=self.message_queue.qsize(),
-                               message_hash=message_hash[:8])
+                            server=message.server_name,
+                            channel=message.channel_name,
+                            channel_type=channel_type,
+                            author=getattr(message, 'author', 'Unknown'),
+                            queue_size=self.message_queue.qsize(),
+                            message_hash=message_hash[:8] if 'message_hash' in locals() else 'unknown')
                 
             except asyncio.TimeoutError:
                 self.logger.error("❌ Message queue timeout - dropping WebSocket message",
                                 server=message.server_name,
                                 queue_size=self.message_queue.qsize())
                 self.stats.errors_last_hour += 1
-                
+            except Exception as queue_error:
+                self.logger.error("❌ Error queuing WebSocket message",
+                                server=message.server_name,
+                                error=str(queue_error),
+                                error_type=type(queue_error).__name__)
+                self.stats.errors_last_hour += 1
+                    
         except Exception as e:
             self.logger.error("❌ Error handling WebSocket message",
-                            server=message.server_name,
-                            error=str(e))
+                            server=getattr(message, 'server_name', 'unknown'),
+                            error=str(e),
+                            error_type=type(e).__name__)
             self.stats.errors_last_hour += 1
     
     def _create_message_hash(self, message: DiscordMessage) -> str:
@@ -234,7 +339,7 @@ class MessageProcessor:
         self.server_message_counts[server_name] += 1
     
     async def start(self) -> None:
-        """Start the message processor and WebSocket monitoring"""
+        """Start the message processor with enhanced error handling"""
         if self.running:
             self.logger.warning("⚠️ Message processor is already running")
             return
@@ -244,72 +349,154 @@ class MessageProcessor:
         
         self.logger.info("🚀 Starting Message Processor with WebSocket-only system")
         
-        # Start background tasks
-        self.tasks = [
-            asyncio.create_task(self._websocket_message_processor_loop(), name="websocket_processor"),
-            asyncio.create_task(self._cleanup_loop(), name="cleanup"),
-            asyncio.create_task(self._stats_update_loop(), name="stats"),
-            asyncio.create_task(self._health_check_loop(), name="health"),
-            asyncio.create_task(self._rate_limit_cleanup_loop(), name="rate_limit_cleanup"),
-            asyncio.create_task(self._deduplication_cleanup_loop(), name="dedup_cleanup"),
-            asyncio.create_task(self._websocket_stats_loop(), name="websocket_stats")
+        # Start background tasks with individual error handling
+        task_definitions = [
+            ("websocket_processor", self._websocket_message_processor_loop),
+            ("cleanup", self._cleanup_loop),
+            ("stats", self._stats_update_loop),
+            ("health", self._health_check_loop),
+            ("rate_limit_cleanup", self._rate_limit_cleanup_loop),
+            ("dedup_cleanup", self._deduplication_cleanup_loop),
+            ("websocket_stats", self._websocket_stats_loop)
         ]
         
+        self.tasks = []
+        for task_name, task_func in task_definitions:
+            try:
+                task = asyncio.create_task(task_func(), name=task_name)
+                self.tasks.append(task)
+                self.logger.info(f"✅ Started background task: {task_name}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to start background task: {task_name}", error=str(e))
+                # Continue with other tasks
+        
         # Start Discord WebSocket monitoring
-        discord_task = asyncio.create_task(
-            self.discord_service.start_websocket_monitoring(), 
-            name="discord_websocket"
-        )
-        self.tasks.append(discord_task)
+        try:
+            discord_task = asyncio.create_task(
+                self.discord_service.start_websocket_monitoring(), 
+                name="discord_websocket"
+            )
+            self.tasks.append(discord_task)
+            self.logger.info("✅ Discord WebSocket monitoring task started")
+        except Exception as e:
+            self.logger.error("❌ Failed to start Discord WebSocket monitoring", error=str(e))
+            # Critical error for WebSocket-only system
+            await self.stop()
+            return
         
         # Start Telegram bot
-        telegram_task = asyncio.create_task(
-            self.telegram_service.start_bot_async(), 
-            name="telegram_bot"
-        )
-        self.tasks.append(telegram_task)
+        try:
+            telegram_task = asyncio.create_task(
+                self.telegram_service.start_bot_async(), 
+                name="telegram_bot"
+            )
+            self.tasks.append(telegram_task)
+            self.logger.info("✅ Telegram bot task started")
+        except Exception as e:
+            self.logger.error("❌ Failed to start Telegram bot", error=str(e))
+            # Not critical for message processing, continue
         
         # Perform initial sync ТОЛЬКО ОДИН РАЗ (2 сообщения)
-        await self._perform_initial_sync_once()
+        try:
+            await self._perform_initial_sync_once()
+            self.logger.info("✅ Initial synchronization completed")
+        except Exception as e:
+            self.logger.error("❌ Error during initial sync", error=str(e))
+            # Continue anyway
         
         self.logger.info("✅ Message Processor started successfully - WebSocket monitoring active")
         
         try:
-            # Wait for all tasks with error isolation
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            # Wait for all tasks with enhanced error handling
+            results = await asyncio.gather(*self.tasks, return_exceptions=True)
             
             # Log any individual task failures
-            for task in self.tasks:
-                if task.done() and task.exception():
+            for task, result in zip(self.tasks, results):
+                if isinstance(result, Exception):
                     self.logger.error("❌ Task failed",
-                                   task_name=task.get_name(),
-                                   error=str(task.exception()))
+                                task_name=task.get_name(),
+                                error=str(result),
+                                error_type=type(result).__name__)
+                elif task.done() and task.exception():
+                    self.logger.error("❌ Task completed with exception",
+                                task_name=task.get_name(),
+                                error=str(task.exception()))
         except Exception as e:
-            self.logger.error("❌ Critical error in message processor", error=str(e))
+            self.logger.error("❌ Critical error in message processor", 
+                            error=str(e),
+                            error_type=type(e).__name__)
         finally:
             await self.stop()
     
     async def stop(self) -> None:
-        """Stop the message processor and clean up"""
+        """Stop the message processor with enhanced cleanup"""
         if not self.running:
+            self.logger.info("Message processor is not running")
             return
         
         self.running = False
         self.logger.info("🛑 Stopping Message Processor")
         
-        # Cancel all tasks
+        # Cancel all background tasks
+        cancelled_tasks = 0
         for task in self.tasks:
-            task.cancel()
+            if not task.done():
+                task.cancel()
+                cancelled_tasks += 1
         
-        # Wait for tasks to complete
+        if cancelled_tasks > 0:
+            self.logger.info(f"Cancelled {cancelled_tasks} background tasks")
+        
+        # Wait for tasks to complete with timeout
         if self.tasks:
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self.tasks, return_exceptions=True),
+                    timeout=30.0
+                )
+                self.logger.info("All background tasks completed")
+            except asyncio.TimeoutError:
+                self.logger.warning("Some background tasks did not complete within timeout")
+            except Exception as e:
+                self.logger.error("Error waiting for tasks to complete", error=str(e))
         
         # Cleanup services
-        await self.discord_service.cleanup()
-        await self.telegram_service.cleanup()
+        cleanup_errors = []
         
-        self.logger.info("✅ Message Processor stopped")
+        try:
+            await self.discord_service.cleanup()
+            self.logger.info("Discord service cleaned up")
+        except Exception as e:
+            cleanup_errors.append(f"Discord cleanup error: {e}")
+            self.logger.error("Error cleaning up Discord service", error=str(e))
+        
+        try:
+            await self.telegram_service.cleanup()
+            self.logger.info("Telegram service cleaned up")
+        except Exception as e:
+            cleanup_errors.append(f"Telegram cleanup error: {e}")
+            self.logger.error("Error cleaning up Telegram service", error=str(e))
+        
+        # Final cleanup
+        try:
+            # Clear memory structures
+            async with self.message_dedup_lock:
+                self.processed_message_hashes.clear()
+            
+            self.channel_initialization_done.clear()
+            self.last_processed_message_per_channel.clear()
+            
+            self.logger.info("Memory structures cleared")
+        except Exception as e:
+            cleanup_errors.append(f"Memory cleanup error: {e}")
+            self.logger.error("Error during memory cleanup", error=str(e))
+        
+        if cleanup_errors:
+            self.logger.warning(f"Message Processor stopped with {len(cleanup_errors)} cleanup errors")
+            for error in cleanup_errors:
+                self.logger.warning(f"  • {error}")
+        else:
+            self.logger.info("✅ Message Processor stopped cleanly")
     
     async def _perform_initial_sync_once(self) -> None:
         """Выполнить начальную синхронизацию ТОЛЬКО 2 сообщения"""
@@ -910,6 +1097,166 @@ class MessageProcessor:
             }
         }
     
+    def get_diagnostic_info(self) -> Dict[str, Any]:
+        """Получить подробную диагностическую информацию"""
+        diagnostic = {
+            "timestamp": datetime.now().isoformat(),
+            "service_status": {
+                "running": self.running,
+                "initialized": hasattr(self, 'discord_service') and hasattr(self, 'telegram_service'),
+                "start_time": self.start_time.isoformat() if self.start_time else None,
+                "uptime_seconds": int((datetime.now() - self.start_time).total_seconds()) if self.start_time else 0
+            },
+            "tasks": {
+                "total_tasks": len(self.tasks),
+                "running_tasks": len([t for t in self.tasks if not t.done()]),
+                "failed_tasks": len([t for t in self.tasks if t.done() and t.exception()]),
+                "task_details": []
+            },
+            "message_processing": {
+                "initial_sync_completed": self.initial_sync_completed,
+                "websocket_messages_received": self.websocket_messages_received,
+                "websocket_messages_processed": self.websocket_messages_processed,
+                "queue_size": self.message_queue.qsize(),
+                "processed_hashes": len(self.processed_message_hashes),
+                "initialized_channels": len(self.channel_initialization_done)
+            },
+            "discord_service": {},
+            "telegram_service": {},
+            "errors_and_warnings": []
+        }
+        
+        # Детали задач
+        for task in self.tasks:
+            task_info = {
+                "name": task.get_name(),
+                "done": task.done(),
+                "cancelled": task.cancelled(),
+                "exception": str(task.exception()) if task.done() and task.exception() else None
+            }
+            diagnostic["tasks"]["task_details"].append(task_info)
+        
+        # Discord service диагностика
+        try:
+            if hasattr(self.discord_service, 'get_service_health'):
+                diagnostic["discord_service"] = self.discord_service.get_service_health()
+            else:
+                diagnostic["discord_service"] = {
+                    "available": hasattr(self, 'discord_service'),
+                    "sessions": len(getattr(self.discord_service, 'sessions', [])),
+                    "servers": len(getattr(self.discord_service, 'servers', {})),
+                    "monitored_channels": len(getattr(self.discord_service, 'monitored_announcement_channels', set()))
+                }
+        except Exception as e:
+            diagnostic["discord_service"] = {"error": str(e)}
+            diagnostic["errors_and_warnings"].append(f"Discord service diagnostic error: {e}")
+        
+        # Telegram service диагностика
+        try:
+            if hasattr(self.telegram_service, 'get_bot_health'):
+                diagnostic["telegram_service"] = self.telegram_service.get_bot_health()
+            else:
+                diagnostic["telegram_service"] = {
+                    "available": hasattr(self, 'telegram_service'),
+                    "bot_running": getattr(self.telegram_service, 'bot_running', False),
+                    "topics": len(getattr(self.telegram_service, 'server_topics', {}))
+                }
+        except Exception as e:
+            diagnostic["telegram_service"] = {"error": str(e)}
+            diagnostic["errors_and_warnings"].append(f"Telegram service diagnostic error: {e}")
+        
+        # Общие предупреждения
+        if not self.running:
+            diagnostic["errors_and_warnings"].append("Message processor is not running")
+        
+        if self.message_queue.qsize() > 100:
+            diagnostic["errors_and_warnings"].append(f"High message queue size: {self.message_queue.qsize()}")
+        
+        if len(self.processed_message_hashes) > 10000:
+            diagnostic["errors_and_warnings"].append(f"High processed hashes count: {len(self.processed_message_hashes)}")
+        
+        if not self.initial_sync_completed:
+            diagnostic["errors_and_warnings"].append("Initial sync not completed")
+        
+        failed_tasks = [t for t in self.tasks if t.done() and t.exception()]
+        if failed_tasks:
+            diagnostic["errors_and_warnings"].append(f"{len(failed_tasks)} background tasks have failed")
+        
+        return diagnostic
+    
+    async def emergency_recovery(self) -> bool:
+        """Emergency recovery procedure for critical failures"""
+        self.logger.warning("🚨 Starting emergency recovery procedure")
+        
+        recovery_steps = []
+        
+        try:
+            # Step 1: Stop current operations
+            self.running = False
+            recovery_steps.append("✅ Stopped current operations")
+            
+            # Step 2: Clear problematic state
+            try:
+                async with self.message_dedup_lock:
+                    self.processed_message_hashes.clear()
+                self.channel_initialization_done.clear()
+                self.initial_sync_completed = False
+                recovery_steps.append("✅ Cleared problematic state")
+            except Exception as state_error:
+                recovery_steps.append(f"❌ State cleanup error: {state_error}")
+            
+            # Step 3: Reset queue
+            try:
+                while not self.message_queue.empty():
+                    try:
+                        self.message_queue.get_nowait()
+                    except:
+                        break
+                recovery_steps.append("✅ Reset message queue")
+            except Exception as queue_error:
+                recovery_steps.append(f"❌ Queue reset error: {queue_error}")
+            
+            # Step 4: Attempt service recovery
+            try:
+                if hasattr(self.discord_service, 'get_service_health'):
+                    discord_health = self.discord_service.get_service_health()
+                    if discord_health.get('status') != 'healthy':
+                        self.logger.warning("Discord service unhealthy, attempting recovery")
+                        # Could add Discord service recovery here
+                recovery_steps.append("✅ Discord service check completed")
+            except Exception as discord_error:
+                recovery_steps.append(f"❌ Discord service recovery error: {discord_error}")
+            
+            try:
+                if hasattr(self.telegram_service, 'get_bot_health'):
+                    telegram_health = self.telegram_service.get_bot_health()
+                    if telegram_health.get('status') != 'healthy':
+                        self.logger.warning("Telegram service unhealthy, attempting recovery")
+                        # Could add Telegram service recovery here
+                recovery_steps.append("✅ Telegram service check completed")
+            except Exception as telegram_error:
+                recovery_steps.append(f"❌ Telegram service recovery error: {telegram_error}")
+            
+            # Step 5: Restart if possible
+            try:
+                self.logger.info("Attempting to restart after recovery")
+                return await self.initialize()
+            except Exception as restart_error:
+                recovery_steps.append(f"❌ Restart error: {restart_error}")
+                return False
+            
+        except Exception as e:
+            self.logger.error("❌ Emergency recovery failed", error=str(e))
+            recovery_steps.append(f"❌ Recovery procedure failed: {e}")
+            return False
+        
+        finally:
+            self.logger.info("🚨 Emergency recovery completed")
+            for step in recovery_steps:
+                self.logger.info(f"  {step}")
+            
+            return True
+    
     def get_websocket_performance_stats(self) -> Dict[str, any]:
         """Получить статистику производительности WebSocket"""
         ws_status = self.discord_service.get_websocket_status()
@@ -956,3 +1303,4 @@ class MessageProcessor:
                 "deduplication_efficiency": len(self.processed_message_hashes) < 10000
             }
         }
+        

@@ -259,7 +259,7 @@ def clear_settings_cache():
     print("🔄 Settings cache cleared")
 
 def get_settings(force_reload: bool = False) -> Settings:
-    """Get cached settings instance с возможностью принудительной перезагрузки"""
+    """Get cached settings instance с улучшенной обработкой ошибок"""
     global _settings_cache, _env_file_mtime
     
     env_file_path = ".env"
@@ -269,27 +269,92 @@ def get_settings(force_reload: bool = False) -> Settings:
     try:
         if os.path.exists(env_file_path):
             current_mtime = os.path.getmtime(env_file_path)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Warning: Could not check .env file modification time: {e}")
     
     # Принудительная перезагрузка или изменился .env файл
     if force_reload or _settings_cache is None or current_mtime != _env_file_mtime:
         print(f"🔄 {'Force reload' if force_reload else 'Auto reload'} - creating new settings instance")
         
-        # Перезагружаем переменные окружения
-        reload_env()
-        
-        # Создаем новый экземпляр настроек
-        _settings_cache = Settings()
-        _env_file_mtime = current_mtime
-        
-        print(f"✅ New settings loaded:")
-        print(f"   • Discord tokens: {_settings_cache.discord_tokens_count}")
-        print(f"   • Telegram chat ID: {_settings_cache.telegram_chat_id}")
-        print(f"   • Bot token preview: {_settings_cache.telegram_bot_token[:10]}...")
-        print(f"   • Use topics: {_settings_cache.use_topics}")
+        try:
+            # Перезагружаем переменные окружения
+            reload_env()
+            
+            # Создаем новый экземпляр настроек с обработкой ошибок
+            _settings_cache = Settings()
+            _env_file_mtime = current_mtime
+            
+            print(f"✅ New settings loaded:")
+            print(f"   • Discord tokens: {_settings_cache.discord_tokens_count}")
+            print(f"   • Telegram chat ID: {_settings_cache.telegram_chat_id}")
+            
+            # ИСПРАВЛЕНИЕ: Безопасная проверка токена
+            if _settings_cache.telegram_bot_token:
+                token_preview = _settings_cache.telegram_bot_token[:15] + "..." if len(_settings_cache.telegram_bot_token) > 15 else _settings_cache.telegram_bot_token
+                print(f"   • Bot token preview: {token_preview}")
+            else:
+                print(f"   • Bot token: NOT SET")
+            
+            print(f"   • Use topics: {_settings_cache.use_topics}")
+            
+        except Exception as settings_error:
+            print(f"❌ Error creating settings: {settings_error}")
+            print(f"   Error type: {type(settings_error).__name__}")
+            
+            # Если есть старые настройки, используем их
+            if _settings_cache is not None:
+                print(f"⚠️ Using cached settings due to error")
+                return _settings_cache
+            else:
+                # Критическая ошибка - не можем создать настройки
+                print(f"💥 Critical: Cannot create settings and no cache available")
+                raise RuntimeError(f"Failed to load settings: {settings_error}")
     
     return _settings_cache
+
+def validate_settings(settings: Settings) -> tuple[bool, list[str]]:
+    """Валидация настроек с подробными сообщениями об ошибках"""
+    errors = []
+    
+    # Проверка Discord токенов
+    if not settings.discord_tokens:
+        errors.append("DISCORD_AUTH_TOKENS: No tokens provided")
+    else:
+        for i, token in enumerate(settings.discord_tokens):
+            if not token or len(token.strip()) < 50:
+                errors.append(f"DISCORD_AUTH_TOKENS: Token {i+1} is too short (expected 50+ characters)")
+            elif token.startswith('Bot '):
+                errors.append(f"DISCORD_AUTH_TOKENS: Token {i+1} appears to be a bot token (should be user token)")
+    
+    # Проверка Telegram настроек
+    if not settings.telegram_bot_token:
+        errors.append("TELEGRAM_BOT_TOKEN: Not provided")
+    else:
+        token_parts = settings.telegram_bot_token.split(':')
+        if len(token_parts) != 2 or not token_parts[0].isdigit():
+            errors.append("TELEGRAM_BOT_TOKEN: Invalid format (should be NUMBER:STRING)")
+    
+    if not settings.telegram_chat_id:
+        errors.append("TELEGRAM_CHAT_ID: Not provided")
+    elif settings.telegram_chat_id == 0:
+        errors.append("TELEGRAM_CHAT_ID: Cannot be 0")
+    
+    # Проверка лимитов
+    if settings.max_channels_per_server < 1:
+        errors.append("MAX_CHANNELS_PER_SERVER: Must be at least 1")
+    
+    if settings.max_total_channels < settings.max_channels_per_server:
+        errors.append("MAX_TOTAL_CHANNELS: Must be at least MAX_CHANNELS_PER_SERVER")
+    
+    # Проверка rate limiting
+    if settings.discord_rate_limit_per_second < 0.1:
+        errors.append("DISCORD_RATE_LIMIT_PER_SECOND: Must be at least 0.1")
+    
+    if settings.telegram_rate_limit_per_minute < 1:
+        errors.append("TELEGRAM_RATE_LIMIT_PER_MINUTE: Must be at least 1")
+    
+    return len(errors) == 0, errors
+
 
 # 3: Функции для принудительной перезагрузки
 def reload_settings():

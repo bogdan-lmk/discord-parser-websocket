@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Set, Callable
+from typing import List, Dict, Optional, Set, Callable, Any
 import structlog
 import random
 
@@ -214,14 +214,14 @@ class DiscordService:
         return True
     
     async def _validate_token_and_get_gateway(self, session: aiohttp.ClientSession, token_index: int) -> bool:
-        """Валидация пользовательского Discord токена (не bot токена)"""
+        """Валидация пользовательского Discord токена с улучшенной обработкой ошибок"""
         token = self.settings.discord_tokens[token_index]
         
         # Очищаем токен от лишних пробелов
         clean_token = token.strip()
         
+        # ИСПРАВЛЕНИЕ: Правильная обработка пользовательских токенов
         # Для пользовательских токенов НЕ добавляем префикс "Bot"
-        # Используем токен как есть
         auth_header = clean_token
         
         # Обновляем заголовки сессии для пользовательского токена
@@ -236,11 +236,13 @@ class DiscordService:
             try:
                 if attempt > 0:
                     delay = min(self.max_delay, self.base_delay * (2 ** attempt))
+                    self.logger.warning(f"Retrying token validation after {delay}s", 
+                                    token_index=token_index, attempt=attempt)
                     await asyncio.sleep(delay)
                 
                 await self.rate_limiter.wait_if_needed(f"user_token_validate_{token_index}")
                 
-                # Проверяем пользовательский токен
+                # ИСПРАВЛЕНИЕ: Улучшенная проверка пользовательского токена
                 async with session.get('https://discord.com/api/v9/users/@me') as response:
                     if response.status == 429:
                         retry_after = float(response.headers.get('Retry-After', 60))
@@ -250,9 +252,10 @@ class DiscordService:
                                         attempt=attempt + 1)
                         
                         if attempt < self.max_retries - 1:
-                            await asyncio.sleep(min(retry_after, 60))
+                            await asyncio.sleep(min(retry_after + 1, 60))
                             continue
                         else:
+                            self.logger.error("Rate limit exceeded during validation", token_index=token_index)
                             return False
                     
                     if response.status == 401:
@@ -263,82 +266,117 @@ class DiscordService:
                                         error_details=error_data[:200],
                                         token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
                                         attempt=attempt + 1,
-                                        note="This is a user token, not a bot token")
+                                        note="This should be a user token, not a bot token")
+                        return False
+                    
+                    if response.status == 403:
+                        self.logger.error("User token forbidden - check token permissions", 
+                                        token_index=token_index,
+                                        status=response.status)
                         return False
                     
                     if response.status != 200:
-                        self.logger.error("User token validation failed", 
+                        self.logger.warning("User token validation failed with status", 
                                         token_index=token_index,
                                         status=response.status,
                                         attempt=attempt + 1)
                         
-                        if response.status in [401, 403]:
-                            return False
-                        
-                        continue
-                    
-                    user_data = await response.json()
-                    self.logger.info("User token valid", 
-                                username=user_data.get('username'),
-                                user_id=user_data.get('id'),
-                                discriminator=user_data.get('discriminator'),
-                                token_index=token_index,
-                                token_type="USER_TOKEN")
-                
-                # Для пользовательских токенов используем обычный gateway (не bot gateway)
-                async with session.get('https://discord.com/api/v9/gateway') as gateway_response:
-                    if gateway_response.status == 429:
-                        retry_after = float(gateway_response.headers.get('Retry-After', 60))
-                        if attempt < self.max_retries - 1:
-                            await asyncio.sleep(min(retry_after, 60))
+                        if response.status >= 500:  # Server errors - retry
                             continue
-                        else:
+                        else:  # Client errors - don't retry
                             return False
                     
-                    if gateway_response.status != 200:
-                        error_data = await gateway_response.text()
-                        self.logger.error("Gateway URL retrieval failed for user token", 
+                    try:
+                        user_data = await response.json()
+                        self.logger.info("User token valid", 
+                                    username=user_data.get('username', 'Unknown'),
+                                    user_id=user_data.get('id', 'Unknown'),
+                                    discriminator=user_data.get('discriminator', 'Unknown'),
+                                    token_index=token_index,
+                                    token_type="USER_TOKEN")
+                    except Exception as json_error:
+                        self.logger.error("Failed to parse user data JSON", 
                                         token_index=token_index,
-                                        status=gateway_response.status,
-                                        error_details=error_data[:200])
-                        if gateway_response.status in [401, 403]:
-                            return False
-                        continue
-                    
-                    gateway_data = await gateway_response.json()
-                    gateway_url = gateway_data.get('url')
-                    
-                    if not gateway_url:
-                        self.logger.error("No gateway URL in response", token_index=token_index)
-                        continue
-                    
-                    self.gateway_urls.append(gateway_url)
-                    self.logger.info("Gateway URL obtained for user token", 
-                                token_index=token_index,
-                                gateway_url=gateway_url)
+                                        error=str(json_error))
+                        return False
                 
-                # Тест доступа к гильдиям с пользовательским токеном
-                async with session.get('https://discord.com/api/v9/users/@me/guilds') as guilds_res:
-                    if guilds_res.status == 429:
-                        retry_after = float(guilds_res.headers.get('Retry-After', 60))
-                        if attempt < self.max_retries - 1:
-                            await asyncio.sleep(min(retry_after, 60))
-                            continue
-                        else:
-                            return False
-                    
-                    if guilds_res.status != 200:
-                        if guilds_res.status in [401, 403]:
-                            self.logger.warning("Limited guild access with user token", 
+                # ИСПРАВЛЕНИЕ: Правильный gateway для пользовательских токенов
+                try:
+                    async with session.get('https://discord.com/api/v9/gateway') as gateway_response:
+                        if gateway_response.status == 429:
+                            retry_after = float(gateway_response.headers.get('Retry-After', 60))
+                            if attempt < self.max_retries - 1:
+                                await asyncio.sleep(min(retry_after + 1, 60))
+                                continue
+                            else:
+                                return False
+                        
+                        if gateway_response.status != 200:
+                            error_data = await gateway_response.text()
+                            self.logger.error("Gateway URL retrieval failed for user token", 
                                             token_index=token_index,
-                                            status=guilds_res.status)
-                            # Для пользовательских токенов ограниченный доступ к гильдиям - это нормально
-                        continue
-                    
-                    guilds = await guilds_res.json()
-                    self.logger.info("User token has access to guilds", 
-                                guild_count=len(guilds),
-                                token_index=token_index)
+                                            status=gateway_response.status,
+                                            error_details=error_data[:200])
+                            if gateway_response.status in [401, 403]:
+                                return False
+                            continue
+                        
+                        try:
+                            gateway_data = await gateway_response.json()
+                            gateway_url = gateway_data.get('url')
+                            
+                            if not gateway_url:
+                                self.logger.error("No gateway URL in response", token_index=token_index)
+                                continue
+                            
+                            self.gateway_urls.append(gateway_url)
+                            self.logger.info("Gateway URL obtained for user token", 
+                                        token_index=token_index,
+                                        gateway_url=gateway_url)
+                        except Exception as json_error:
+                            self.logger.error("Failed to parse gateway JSON", 
+                                            token_index=token_index,
+                                            error=str(json_error))
+                            continue
+                            
+                except Exception as gateway_error:
+                    self.logger.error("Gateway request failed", 
+                                    token_index=token_index,
+                                    error=str(gateway_error))
+                    continue
+                
+                # ИСПРАВЛЕНИЕ: Осторожная проверка доступа к гильдиям
+                try:
+                    async with session.get('https://discord.com/api/v9/users/@me/guilds?limit=5') as guilds_res:
+                        if guilds_res.status == 429:
+                            retry_after = float(guilds_res.headers.get('Retry-After', 60))
+                            if attempt < self.max_retries - 1:
+                                await asyncio.sleep(min(retry_after + 1, 60))
+                                continue
+                            else:
+                                # Гильдии не критичны для базовой работы
+                                self.logger.warning("Guild check rate limited, but token is valid", 
+                                                token_index=token_index)
+                        
+                        elif guilds_res.status == 200:
+                            try:
+                                guilds = await guilds_res.json()
+                                self.logger.info("User token has access to guilds", 
+                                            guild_count=len(guilds),
+                                            token_index=token_index)
+                            except:
+                                # Не критичная ошибка
+                                pass
+                        else:
+                            # Ограниченный доступ к гильдиям не критичен
+                            self.logger.info("Limited guild access with user token", 
+                                        token_index=token_index,
+                                        status=guilds_res.status)
+                except Exception as guild_error:
+                    # Гильдии не критичны для валидации токена
+                    self.logger.debug("Guild check failed, but token might still be valid", 
+                                    token_index=token_index,
+                                    error=str(guild_error))
                 
                 self.rate_limiter.record_success()
                 return True
@@ -353,9 +391,11 @@ class DiscordService:
                 self.logger.error("User token validation error", 
                                 token_index=token_index,
                                 error=str(e),
+                                error_type=type(e).__name__,
                                 attempt=attempt + 1)
                 self.rate_limiter.record_error()
         
+        self.logger.error("Token validation failed after all retries", token_index=token_index)
         return False
     
     async def _discover_announcement_channels_only(self) -> None:
@@ -782,6 +822,9 @@ class DiscordService:
         connection_id = f"token_{token_index}"
         max_reconnects = 5
         reconnect_count = 0
+        
+        base_delay = 5
+        max_delay = 300
         
         while self.running and reconnect_count < max_reconnects:
             try:
@@ -1306,6 +1349,181 @@ class DiscordService:
                 "last_sync": server.last_sync.isoformat() if server.last_sync else None
             } for name, server in self.servers.items()}
         }
+    
+    def get_service_health(self) -> Dict[str, Any]:
+        """Получить детальную информацию о состоянии Discord сервиса"""
+        health_info = {
+            "timestamp": datetime.now().isoformat(),
+            "service_initialized": self._initialization_done,
+            "service_running": self.running,
+            "tokens": {
+                "total_configured": len(self.settings.discord_tokens),
+                "valid_sessions": len(self.sessions),
+                "failure_counts": dict(self.token_failure_counts),
+                "gateway_urls": len(self.gateway_urls)
+            },
+            "servers": {
+                "total_discovered": len(self.servers),
+                "active_servers": len([s for s in self.servers.values() if s.status.value == "active"]),
+                "total_channels": sum(s.channel_count for s in self.servers.values()),
+                "accessible_channels": sum(s.accessible_channel_count for s in self.servers.values()),
+                "monitored_channels": len(self.monitored_announcement_channels)
+            },
+            "websocket": {
+                "connections_active": len(self.websocket_connections),
+                "sessions_tracked": len(self.websocket_sessions),
+                "intents": self.intents
+            },
+            "rate_limiting": {
+                "limiter_stats": self.rate_limiter.get_stats() if hasattr(self.rate_limiter, 'get_stats') else {},
+                "request_times": dict(self.last_request_time),
+                "backoff_status": dict(self.backoff_until)
+            },
+            "errors": {
+                "initialization_done": self._initialization_done,
+                "current_token_index": self.current_token_index,
+                "max_retries": self.max_retries
+            }
+        }
+        
+        # Определяем общее состояние здоровья
+        if not self._initialization_done:
+            health_info["status"] = "not_initialized"
+        elif len(self.sessions) == 0:
+            health_info["status"] = "no_valid_tokens"
+        elif len(self.servers) == 0:
+            health_info["status"] = "no_servers_found"
+        elif len(self.monitored_announcement_channels) == 0:
+            health_info["status"] = "no_monitored_channels"
+        elif not self.running:
+            health_info["status"] = "not_running"
+        else:
+            health_info["status"] = "healthy"
+        
+        return health_info
+
+    # ИЗМЕНИТЬ метод initialize (заменить метод с улучшенной обработкой ошибок):
+    async def initialize(self) -> bool:
+        """Инициализация Discord service с улучшенной обработкой ошибок"""
+        if self._initialization_done:
+            self.logger.info("Discord service already initialized")
+            return True
+            
+        self.logger.info("Initializing Discord service with USER TOKENS (not bot tokens)", 
+                        token_count=len(self.settings.discord_tokens),
+                        max_servers=self.settings.max_servers,
+                        max_channels_total=self.settings.max_total_channels,
+                        token_type="USER_TOKEN")
+        
+        # Проверяем наличие токенов
+        if not self.settings.discord_tokens:
+            self.logger.error("No Discord tokens provided in configuration")
+            return False
+        
+        # Очищаем старые данные
+        self.sessions.clear()
+        self.gateway_urls.clear()
+        self.token_failure_counts.clear()
+        
+        # Создаем сессии для пользовательских токенов
+        successful_tokens = 0
+        total_tokens = len(self.settings.discord_tokens)
+        
+        for i, raw_token in enumerate(self.settings.discord_tokens):
+            try:
+                # Очищаем токен
+                clean_token = raw_token.strip()
+                
+                # Убираем префикс "Bot " если кто-то случайно добавил
+                if clean_token.startswith('Bot '):
+                    clean_token = clean_token[4:].strip()
+                    self.logger.warning(f"Removed 'Bot ' prefix from user token {i+1}")
+                
+                self.logger.info(f"Initializing user token {i+1}/{total_tokens}", 
+                                token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
+                                token_type="USER_TOKEN")
+                
+                # Создаем сессию с заголовками для пользовательского токена
+                session = aiohttp.ClientSession(
+                    headers={
+                        'Authorization': clean_token,  # БЕЗ префикса "Bot"
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Content-Type': 'application/json',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-origin'
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30, connect=10),
+                    connector=aiohttp.TCPConnector(
+                        limit=20,
+                        limit_per_host=3,
+                        ttl_dns_cache=300,
+                        use_dns_cache=True
+                    )
+                )
+                
+                if await self._validate_token_and_get_gateway(session, i):
+                    self.sessions.append(session)
+                    self.token_failure_counts[i] = 0
+                    successful_tokens += 1
+                    self.logger.info("User token validated successfully", 
+                                token_index=i,
+                                successful_count=successful_tokens)
+                else:
+                    await session.close()
+                    self.logger.error("User token validation failed", 
+                                    token_index=i,
+                                    token_preview=f"{clean_token[:15]}...{clean_token[-10:]}",
+                                    help="Check token validity and ensure it's a user token, not a bot token")
+                                    
+            except Exception as token_error:
+                self.logger.error("Error initializing token", 
+                                token_index=i,
+                                error=str(token_error),
+                                error_type=type(token_error).__name__)
+                try:
+                    if 'session' in locals():
+                        await session.close()
+                except:
+                    pass
+        
+        if not self.sessions:
+            self.logger.error("No valid Discord user tokens available")
+            self.logger.error("TROUBLESHOOTING STEPS:")
+            self.logger.error("1. Check your Discord USER tokens in .env file")
+            self.logger.error("2. Ensure tokens are user tokens, NOT bot tokens")
+            self.logger.error("3. Verify tokens have not expired")
+            self.logger.error("4. Check internet connectivity")
+            self.logger.error("5. Run 'python -m app.test_tokens' for detailed diagnostics")
+            return False
+        
+        self.logger.info(f"Successfully initialized {successful_tokens}/{total_tokens} user tokens")
+        
+        # Поиск announcement каналов с обработкой ошибок
+        try:
+            await self._discover_announcement_channels_only()
+        except Exception as e:
+            self.logger.error("Error during channel discovery", 
+                            error=str(e),
+                            error_type=type(e).__name__)
+            # Продолжаем работу даже если не удалось найти каналы
+            self.logger.warning("Continuing with initialization despite channel discovery errors")
+        
+        self._initialization_done = True
+        self.logger.info("Discord service initialized with USER TOKENS", 
+                        valid_tokens=len(self.sessions),
+                        servers_found=len(self.servers),
+                        announcement_channels=len(self.monitored_announcement_channels),
+                        gateway_urls=len(self.gateway_urls),
+                        token_type="USER_TOKEN",
+                        success_rate=f"{successful_tokens}/{total_tokens}",
+                        note="Using Discord user tokens, not bot tokens")
+        return True
     
     async def cleanup(self) -> None:
         """Clean up resources"""

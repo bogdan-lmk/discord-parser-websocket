@@ -2,7 +2,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 from threading import Lock
 import structlog
 import telebot
@@ -72,35 +72,53 @@ class TelegramService:
         return False
     
     def _initialize_bot(self):
-        """Правильная инициализация бота"""
+        """Правильная инициализация бота с улучшенной обработкой ошибок"""
         try:
-            self.bot = telebot.TeleBot(
-                self.settings.telegram_bot_token,
-                skip_pending=True,
-                threaded=True,  
-                parse_mode=None,
-                num_threads=4  
-            )
-            try:
-                bot_info = self.bot.get_me()
-                self.logger.info("Telegram bot initialized successfully with safe threading", 
-                                bot_username=bot_info.username,
-                                bot_id=bot_info.id,
-                                threads=4)
-            except Exception as e:
-                self.logger.error(f"Bot test failed: {e}")
+            if not self.settings.telegram_bot_token:
+                self.logger.error("Telegram bot token not provided")
+                self.bot = None
+                return False
+                
+            # Проверяем формат токена
+            token_parts = self.settings.telegram_bot_token.split(':')
+            if len(token_parts) != 2 or not token_parts[0].isdigit():
+                self.logger.error("Invalid Telegram bot token format", 
+                                token_preview=f"{self.settings.telegram_bot_token[:10]}...")
                 self.bot = None
                 return False
             
-            # Сразу устанавливаем обработчики
+            self.bot = telebot.TeleBot(
+                self.settings.telegram_bot_token,
+                skip_pending=True,
+                threaded=False,  # ИСПРАВЛЕНИЕ: Отключаем threading для стабильности
+                parse_mode=None,
+                num_threads=1  # ИСПРАВЛЕНИЕ: Минимальное количество потоков
+            )
+            
+            # Проверяем бота
+            try:
+                bot_info = self.bot.get_me()
+                self.logger.info("Telegram bot initialized successfully", 
+                                bot_username=bot_info.username,
+                                bot_id=bot_info.id,
+                                bot_name=bot_info.first_name)
+            except Exception as e:
+                self.logger.error(f"Bot validation failed: {e}")
+                self.bot = None
+                return False
+            
+            # Устанавливаем обработчики
             self._setup_bot_handlers()
             
-            self.logger.info("Telegram bot initialized successfully", 
-                           bot_token_preview=self.settings.telegram_bot_token[:10] + "...")
-                           
+            self.logger.info("Telegram bot initialized successfully with enhanced error handling")
+            return True
+                        
         except Exception as e:
-            self.logger.error("Failed to initialize Telegram bot", error=str(e))
+            self.logger.error("Failed to initialize Telegram bot", 
+                            error=str(e),
+                            error_type=type(e).__name__)
             self.bot = None
+            return False
     
     def _setup_bot_handlers(self):
         """Настройка обработчиков бота"""
@@ -169,85 +187,134 @@ class TelegramService:
         
         @self.bot.callback_query_handler(func=lambda call: True)
         def handle_callback_query(call):
-            """ Обработчик callback запросов без дублирования"""
+            """Обработчик callback запросов с улучшенной обработкой ошибок"""
             try:
                 data = call.data
-                self.logger.info(f"📞 Callback received: {data} from user {call.from_user.id}")
+                user_id = call.from_user.id
+                chat_id = call.message.chat.id
                 
-                # Отвечаем на callback
-                try:
-                    self.bot.answer_callback_query(call.id, "⏳ Обработка...")
-                except Exception as e:
-                    self.logger.warning(f"Failed to answer callback: {e}")
+                self.logger.info(f"📞 Callback received: {data} from user {user_id}")
                 
-                # Route to appropriate handler
-                if data == "servers":
-                    self._handle_servers_list(call)
-                elif data.startswith("servers_page_"):
-                    self._handle_servers_pagination(call)
-                elif data == "page_info":
-                    # Just acknowledge page info clicks
-                    self.bot.answer_callback_query(call.id, "📄 Current page information")
-                    return
-                elif data == "refresh":
-                    self._handle_manual_sync(call)
-                elif data == "websocket":
-                    self._handle_websocket_status(call)
-                elif data == "cleanup":
-                    self._handle_cleanup_topics(call)
-                elif data == "status":
-                    self._handle_bot_status(call)
-                elif data == "help":
-                    self._handle_help(call)
-                elif data == "start":
-                    send_welcome(call.message)
-                elif data == "verify":
-                    self._handle_verify_topics(call)
-                elif data.startswith("server_"):
-                    self._handle_server_selected(call)
-                elif data.startswith("get_messages_"):
-                    self._handle_get_messages(call)
-                elif data.startswith("add_channel_"):
-                    self._handle_add_channel_request(call)
-                elif data.startswith("confirm_add_"):
-                    self._handle_confirm_add_channel(call)
-                elif data.startswith("cancel_add_"):
-                    self._handle_cancel_add_channel(call)
-                elif data.startswith("remove_channel_"):
-                    self._handle_remove_channel_request(call)
-                elif data.startswith("confirm_remove_"):
-                    self._handle_confirm_remove_channel(call)
-                elif data.startswith("final_remove_"):
-                    self._handle_final_remove_channel(call)
-                elif data.startswith("manage_channels_"):
-                    self._handle_manage_channels(call)
-                elif data.startswith("channel_stats_"):
-                    self._handle_channel_stats(call)
-                elif data.startswith("show_all_remove_"):
-                    self._handle_show_all_removable(call)
-                elif data.startswith("browse_channels_"):
-                    self._handle_browse_channels(call)
-                elif data.startswith("channel_info_"):
-                    self._handle_channel_info(call)
-                else:
-                    self.logger.warning(f"⚠️ Unknown callback data: {data}")
+                # ИСПРАВЛЕНИЕ: Проверяем что callback от правильного чата
+                if chat_id != self.settings.telegram_chat_id:
+                    self.logger.warning(f"Callback from unauthorized chat: {chat_id}")
                     try:
+                        self.bot.answer_callback_query(call.id, "❌ Unauthorized")
+                    except:
+                        pass
+                    return
+                
+                # Отвечаем на callback немедленно чтобы убрать "loading"
+                try:
+                    self.bot.answer_callback_query(call.id, "⏳ Processing...")
+                except Exception as e:
+                    self.logger.warning(f"Failed to answer callback query: {e}")
+                
+                # ИСПРАВЛЕНИЕ: Более безопасная маршрутизация
+                try:
+                    if data == "servers":
+                        self._handle_servers_list(call)
+                    elif data.startswith("servers_page_"):
+                        self._handle_servers_pagination(call)
+                    elif data == "page_info":
+                        # Просто подтверждаем
+                        try:
+                            self.bot.answer_callback_query(call.id, "📄 Page information")
+                        except:
+                            pass
+                        return
+                    elif data == "refresh":
+                        self._handle_manual_sync(call)
+                    elif data == "websocket":
+                        self._handle_websocket_status(call)
+                    elif data == "cleanup":
+                        self._handle_cleanup_topics(call)
+                    elif data == "status":
+                        self._handle_bot_status(call)
+                    elif data == "help":
+                        self._handle_help(call)
+                    elif data == "start":
+                        # Эмулируем start команду
+                        message_mock = type('MockMessage', (), {
+                            'chat': type('MockChat', (), {'id': chat_id})(),
+                            'from_user': call.from_user
+                        })()
+                        send_welcome(message_mock)
+                    elif data == "verify":
+                        self._handle_verify_topics(call)
+                    elif data.startswith("server_"):
+                        self._handle_server_selected(call)
+                    elif data.startswith("get_messages_"):
+                        self._handle_get_messages(call)
+                    elif data.startswith("add_channel_"):
+                        self._handle_add_channel_request(call)
+                    elif data.startswith("confirm_add_"):
+                        self._handle_confirm_add_channel(call)
+                    elif data.startswith("cancel_add_"):
+                        self._handle_cancel_add_channel(call)
+                    elif data.startswith("remove_channel_"):
+                        self._handle_remove_channel_request(call)
+                    elif data.startswith("confirm_remove_"):
+                        self._handle_confirm_remove_channel(call)
+                    elif data.startswith("final_remove_"):
+                        self._handle_final_remove_channel(call)
+                    elif data.startswith("manage_channels_"):
+                        self._handle_manage_channels(call)
+                    elif data.startswith("channel_stats_"):
+                        self._handle_channel_stats(call)
+                    elif data.startswith("show_all_remove_"):
+                        self._handle_show_all_removable(call)
+                    elif data.startswith("browse_channels_"):
+                        self._handle_browse_channels(call)
+                    elif data.startswith("channel_info_"):
+                        self._handle_channel_info(call)
+                    else:
+                        self.logger.warning(f"⚠️ Unknown callback data: {data}")
+                        try:
+                            self.bot.edit_message_text(
+                                f"❌ Unknown command: {data}\n\nUse /start to return to main menu",
+                                call.message.chat.id,
+                                call.message.message_id
+                            )
+                        except Exception as edit_error:
+                            self.logger.warning(f"Could not edit message for unknown command: {edit_error}")
+                
+                except Exception as handler_error:
+                    self.logger.error(f"Error in specific callback handler", 
+                                    callback_data=data,
+                                    error=str(handler_error),
+                                    error_type=type(handler_error).__name__)
+                    
+                    # Безопасная отправка сообщения об ошибке
+                    try:
+                        error_message = (
+                            f"❌ Error processing command: {data}\n\n"
+                            f"Error: {str(handler_error)[:100]}...\n\n"
+                            f"Please try again or use /start"
+                        )
+                        
                         self.bot.edit_message_text(
-                            f"❌ Неизвестная команда: {data}",
+                            error_message,
                             call.message.chat.id,
                             call.message.message_id
                         )
-                    except:
-                        pass
+                    except Exception as error_msg_error:
+                        self.logger.error(f"Could not send error message: {error_msg_error}")
+                        # Последняя попытка - ответить через callback
+                        try:
+                            self.bot.answer_callback_query(call.id, f"❌ Error: {str(handler_error)[:50]}...")
+                        except:
+                            pass
                 
             except Exception as e:
-                self.logger.error(f"❌ Error handling callback query: {e}")
+                self.logger.error(f"❌ Critical error in callback query handler", 
+                                error=str(e),
+                                error_type=type(e).__name__,
+                                user_id=getattr(call.from_user, 'id', 'unknown'))
+                
+                # Критическая ошибка - пытаемся хотя бы ответить на callback
                 try:
-                    self.bot.edit_message_text(
-                        f"❌ Произошла ошибка при обработке: {str(e)}",
-                        call.message.chat.id,
-                        call.message.message_id
-                    )
+                    self.bot.answer_callback_query(call.id, "❌ Critical error occurred")
                 except:
                     pass
         
@@ -2757,56 +2824,71 @@ class TelegramService:
             self.logger.error(f"Error in async save: {e}")
     
     async def start_bot_async(self) -> None:
-        """Start the enhanced Telegram bot asynchronously"""
+        """Start the enhanced Telegram bot asynchronously with improved error handling"""
         if self.bot_running:
             self.logger.warning("Enhanced bot is already running")
             return
         
         if not self.bot:
-            self.logger.error("Bot not initialized, cannot start")
-            return
+            self.logger.error("Bot not initialized, attempting to reinitialize")
+            if not self._initialize_bot():
+                self.logger.error("Failed to reinitialize bot, cannot start")
+                return
         
-        self._setup_bot_handlers()
         self.bot_running = True
         
-        
         self.logger.info("Starting Enhanced Telegram bot", 
-                       chat_id=self.settings.telegram_chat_id,
-                       use_topics=self.settings.use_topics,
-                       server_topics=len(self.server_topics),
-                       features=["Anti-duplicate", "Interactive UI", "Channel management"])
+                    chat_id=self.settings.telegram_chat_id,
+                    use_topics=self.settings.use_topics,
+                    server_topics=len(self.server_topics),
+                    features=["Anti-duplicate", "Interactive UI", "Channel management"])
         
         try:
-            # Запускаем бота в отдельном потоке
-            def run_bot():
+            # ИСПРАВЛЕНИЕ: Более безопасный запуск бота
+            def run_bot_safely():
                 try:
                     self.logger.info("Bot polling started in thread")
+                    
+                    # Устанавливаем webhook на None для polling
+                    try:
+                        self.bot.remove_webhook()
+                        self.logger.debug("Webhook removed, starting polling")
+                    except Exception as webhook_error:
+                        self.logger.warning(f"Could not remove webhook: {webhook_error}")
+                    
+                    # Запускаем polling с улучшенными параметрами
                     self.bot.polling(
                         none_stop=True,
-                        interval=1,
-                        timeout=30,
-                        skip_pending=True
+                        interval=2,  # ИСПРАВЛЕНИЕ: Увеличиваем интервал
+                        timeout=20,  # ИСПРАВЛЕНИЕ: Уменьшаем timeout
+                        skip_pending=True,
+                        allowed_updates=None
                     )
+                    
                 except Exception as e:
-                    self.logger.error("Bot polling error in thread", error=str(e))
+                    self.logger.error("Bot polling error in thread", 
+                                    error=str(e),
+                                    error_type=type(e).__name__)
+                    self.bot_running = False
                 finally:
                     self.bot_running = False
                     self.logger.info("Bot polling stopped")
             
-            # Запускаем в отдельном потоке
-            self._bot_thread = threading.Thread(target=run_bot, daemon=True)
+            # ИСПРАВЛЕНИЕ: Запускаем в отдельном потоке с daemon=True
+            import threading
+            self._bot_thread = threading.Thread(target=run_bot_safely, daemon=True, name="TelegramBot")
             self._bot_thread.start()
             
             self.logger.info("Enhanced Telegram bot started successfully")
             
             # Ждем немного, чтобы убедиться что бот запустился
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
             if not self.bot_running:
-                self.logger.error("Bot failed to start")
+                self.logger.error("Bot failed to start properly")
                 return
             
-            # Отправляем тестовое сообщение для проверки
+            # ИСПРАВЛЕНИЕ: Безопасная отправка тестового сообщения
             try:
                 test_message = (
                     "🤖 **Discord Telegram Parser Bot Started!**\n\n"
@@ -2826,10 +2908,14 @@ class TelegramService:
                 
             except Exception as e:
                 self.logger.warning(f"Could not send startup notification: {e}")
+                # Не критичная ошибка, продолжаем работу
             
         except Exception as e:
-            self.logger.error("Enhanced bot startup error", error=str(e))
+            self.logger.error("Enhanced bot startup error", 
+                            error=str(e),
+                            error_type=type(e).__name__)
             self.bot_running = False
+            raise
     
     def stop_bot(self) -> None:
         """Stop the enhanced Telegram bot"""
@@ -2854,6 +2940,75 @@ class TelegramService:
         except Exception as e:
             self.logger.error("Error stopping enhanced bot", error=str(e))
             self.bot_running = False
+    
+    def get_bot_health(self) -> Dict[str, Any]:
+        """Получить подробную информацию о состоянии Telegram бота"""
+        health_info = {
+            "timestamp": datetime.now().isoformat(),
+            "bot_initialized": self.bot is not None,
+            "bot_running": self.bot_running,
+            "startup_verification_done": self.startup_verification_done,
+            "configuration": {
+                "use_topics": self.settings.use_topics,
+                "chat_id": self.settings.telegram_chat_id,
+                "token_configured": bool(self.settings.telegram_bot_token)
+            },
+            "topics": {
+                "total_server_topics": len(self.server_topics),
+                "topic_cache_size": len(self.topic_name_cache),
+                "server_topics_list": list(self.server_topics.keys())
+            },
+            "message_tracking": {
+                "message_mappings": len(self.message_mappings),
+                "processed_messages": len(self.processed_messages),
+                "storage_file_exists": os.path.exists(self.message_store_file)
+            },
+            "user_sessions": {
+                "active_user_states": len(self.user_states),
+                "user_states_list": list(self.user_states.keys()) if self.user_states else []
+            },
+            "bot_thread": {
+                "thread_exists": self._bot_thread is not None,
+                "thread_alive": self._bot_thread.is_alive() if self._bot_thread else False,
+                "thread_name": self._bot_thread.name if self._bot_thread else None
+            }
+        }
+        
+        # Проверяем состояние чата
+        if self.bot:
+            try:
+                chat = self.bot.get_chat(self.settings.telegram_chat_id)
+                health_info["chat_info"] = {
+                    "chat_type": chat.type,
+                    "chat_title": getattr(chat, 'title', 'Private Chat'),
+                    "supports_topics": getattr(chat, 'is_forum', False),
+                    "accessible": True
+                }
+            except Exception as e:
+                health_info["chat_info"] = {
+                    "accessible": False,
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                }
+        else:
+            health_info["chat_info"] = {
+                "accessible": False,
+                "error": "Bot not initialized"
+            }
+        
+        # Определяем общее состояние
+        if not self.bot:
+            health_info["status"] = "bot_not_initialized"
+        elif not self.bot_running:
+            health_info["status"] = "bot_not_running"
+        elif not health_info["chat_info"]["accessible"]:
+            health_info["status"] = "chat_not_accessible"
+        elif not self.startup_verification_done:
+            health_info["status"] = "verification_pending"
+        else:
+            health_info["status"] = "healthy"
+        
+        return health_info
     
     async def cleanup(self) -> None:
         """Enhanced cleanup"""

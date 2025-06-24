@@ -1,7 +1,3 @@
-# app/main.py
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 import asyncio
 import signal
 from contextlib import asynccontextmanager
@@ -33,7 +29,7 @@ message_processor: Optional[MessageProcessor] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
+    """Application lifespan manager with enhanced error handling"""
     global message_processor
     
     logger = structlog.get_logger(__name__)
@@ -43,34 +39,68 @@ async def lifespan(app: FastAPI):
         # Initialize dependency injection container
         container.wire(modules=[__name__])
         
-        # Get message processor
-        message_processor = container.message_processor()
+        # Get message processor with error handling
+        try:
+            message_processor = container.message_processor()
+        except Exception as e:
+            logger.error("Failed to initialize message processor", error=str(e))
+            raise RuntimeError(f"Message processor initialization failed: {e}")
         
-        # Initialize all services
-        if await message_processor.initialize():
-            logger.info("All services initialized successfully with enhanced features")
-            
-            # Start message processor in background
-            asyncio.create_task(message_processor.start())
+        # Initialize all services with retry logic
+        initialization_success = False
+        for attempt in range(3):
+            try:
+                if await message_processor.initialize():
+                    logger.info("All services initialized successfully with enhanced features")
+                    initialization_success = True
+                    break
+                else:
+                    logger.warning(f"Service initialization attempt {attempt + 1} failed")
+            except Exception as e:
+                logger.error(f"Initialization attempt {attempt + 1} error", error=str(e))
+                if attempt < 2:  # Wait before retry
+                    await asyncio.sleep(5)
+        
+        if not initialization_success:
+            logger.error("Service initialization failed after 3 attempts")
+            raise RuntimeError("Failed to initialize services after multiple attempts")
+        
+        # Start message processor in background with error handling
+        try:
+            processor_task = asyncio.create_task(message_processor.start())
             
             # Setup graceful shutdown
             def signal_handler(signum, frame):
                 logger.info("Received shutdown signal", signal=signum)
+                processor_task.cancel()
                 asyncio.create_task(message_processor.stop())
             
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
             
-        else:
-            logger.error("Service initialization failed")
-            raise RuntimeError("Failed to initialize services")
+        except Exception as e:
+            logger.error("Failed to start message processor", error=str(e))
+            raise RuntimeError(f"Message processor start failed: {e}")
         
         yield
+        
+    except Exception as e:
+        logger.error("Critical error in lifespan", error=str(e))
+        # Попытка graceful shutdown даже при ошибках
+        if message_processor:
+            try:
+                await message_processor.stop()
+            except Exception as stop_error:
+                logger.error("Error during emergency stop", error=str(stop_error))
+        raise
         
     finally:
         logger.info("Shutting down application")
         if message_processor:
-            await message_processor.stop()
+            try:
+                await message_processor.stop()
+            except Exception as e:
+                logger.error("Error during shutdown", error=str(e))
 
 # Create FastAPI app
 app = FastAPI(
@@ -279,6 +309,93 @@ async def get_enhanced_telegram_stats(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Enhanced stats error: {str(e)}")
+    
+@app.get("/diagnostic")
+async def diagnostic_check():
+    """Comprehensive diagnostic endpoint"""
+    try:
+        diagnostic_result = {
+            "timestamp": datetime.now().isoformat(),
+            "status": "checking",
+            "services": {},
+            "issues": [],
+            "recommendations": []
+        }
+        
+        # Check message processor
+        if message_processor:
+            try:
+                status = message_processor.get_status()
+                diagnostic_result["services"]["message_processor"] = {
+                    "available": True,
+                    "running": message_processor.running,
+                    "uptime": status.get("system", {}).get("uptime_seconds", 0)
+                }
+            except Exception as e:
+                diagnostic_result["services"]["message_processor"] = {
+                    "available": False,
+                    "error": str(e)
+                }
+                diagnostic_result["issues"].append(f"Message processor error: {e}")
+        else:
+            diagnostic_result["services"]["message_processor"] = {
+                "available": False,
+                "error": "Not initialized"
+            }
+            diagnostic_result["issues"].append("Message processor not initialized")
+        
+        # Check Discord service
+        try:
+            discord_service = container.discord_service()
+            diagnostic_result["services"]["discord"] = {
+                "available": True,
+                "sessions": len(getattr(discord_service, 'sessions', [])),
+                "servers": len(getattr(discord_service, 'servers', {}))
+            }
+        except Exception as e:
+            diagnostic_result["services"]["discord"] = {
+                "available": False,
+                "error": str(e)
+            }
+            diagnostic_result["issues"].append(f"Discord service error: {e}")
+        
+        # Check Telegram service
+        try:
+            telegram_service = container.telegram_service()
+            diagnostic_result["services"]["telegram"] = {
+                "available": True,
+                "bot_running": getattr(telegram_service, 'bot_running', False),
+                "topics": len(getattr(telegram_service, 'server_topics', {}))
+            }
+        except Exception as e:
+            diagnostic_result["services"]["telegram"] = {
+                "available": False,
+                "error": str(e)
+            }
+            diagnostic_result["issues"].append(f"Telegram service error: {e}")
+        
+        # Determine overall status
+        if not diagnostic_result["issues"]:
+            diagnostic_result["status"] = "healthy"
+        else:
+            diagnostic_result["status"] = "unhealthy"
+            diagnostic_result["recommendations"] = [
+                "Check service configurations",
+                "Verify token validity",
+                "Check network connectivity",
+                "Review logs for detailed errors"
+            ]
+        
+        return diagnostic_result
+        
+    except Exception as e:
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "status": "critical_error",
+            "error": str(e),
+            "message": "Diagnostic check failed"
+        }
+
 @app.post("/servers/{server_name}/sync")
 async def sync_server(
     server_name: str,
@@ -1015,32 +1132,99 @@ async def get_detailed_monitored_channels(
 
 # Error handlers
 @app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Enhanced global exception handler"""
+async def enhanced_global_exception_handler(request, exc):
+    """Enhanced global exception handler with better error reporting"""
     logger = structlog.get_logger(__name__)
+    
+    # Получаем подробную информацию об ошибке
+    error_details = {
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "path": request.url.path,
+        "method": request.method,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Логируем с полным traceback
     logger.error("Unhandled exception in enhanced version", 
-                path=request.url.path,
-                method=request.method,
-                error=str(exc))
+                **error_details,
+                traceback=traceback.format_exc())
+    
+    # Определяем тип ответа в зависимости от ошибки
+    if isinstance(exc, HTTPException):
+        status_code = exc.status_code
+        detail = exc.detail
+    elif isinstance(exc, ValueError):
+        status_code = 400
+        detail = "Invalid request data"
+    elif isinstance(exc, ConnectionError):
+        status_code = 503
+        detail = "Service temporarily unavailable"
+    else:
+        status_code = 500
+        detail = "Internal server error"
     
     return JSONResponse(
-        status_code=500,
+        status_code=status_code,
         content={
-            "error": "Internal server error",
-            "detail": str(exc) if hasattr(app, 'debug') and app.debug else "An unexpected error occurred",
-            "timestamp": datetime.now().isoformat(),
+            "error": detail,
+            "error_type": error_details["error_type"],
+            "timestamp": error_details["timestamp"],
+            "path": error_details["path"],
             "version": "Enhanced v2.2.0",
-            "note": "Check server logs for details"
+            "diagnostic_hint": "Check /diagnostic endpoint for detailed service status",
+            "support_info": {
+                "check_logs": "Review application logs for detailed error information",
+                "verify_config": "Ensure all environment variables are correctly set",
+                "test_tokens": "Verify Discord and Telegram tokens are valid"
+            }
         }
     )
+async def health_startup_check():
+    """Startup health check to ensure basic functionality"""
+    try:
+        # Basic import test
+        from .config import get_settings
+        from .services.discord_service import DiscordService
+        from .services.telegram_service import TelegramService
+        
+        settings = get_settings()
+        logger = structlog.get_logger(__name__)
+        
+        # Test basic configuration
+        if not settings.discord_tokens:
+            raise ValueError("No Discord tokens configured")
+        
+        if not settings.telegram_bot_token:
+            raise ValueError("No Telegram bot token configured")
+        
+        if not settings.telegram_chat_id:
+            raise ValueError("No Telegram chat ID configured")
+        
+        logger.info("Basic configuration validation passed")
+        return True
+        
+    except Exception as e:
+        logger = structlog.get_logger(__name__)
+        logger.error("Startup health check failed", error=str(e))
+        return False
 
 if __name__ == "__main__":
     import uvicorn
+    
+    # Проверяем базовую конфигурацию перед запуском
+    if not asyncio.run(health_startup_check()):
+        print("❌ Startup health check failed. Please check configuration.")
+        sys.exit(1)
+    
+    print("✅ Startup health check passed. Starting server...")
     
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=False,
-        log_level="info"
+        reload=False,  # Отключаем reload для стабильности
+        log_level="info",
+        access_log=True,
+        loop="asyncio"  # Явно указываем event loop
     )
