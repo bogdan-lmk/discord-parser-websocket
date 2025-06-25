@@ -24,7 +24,7 @@ from .models.message import DiscordMessage
 from .models.server import ServerInfo, SystemStats
 from .services.message_processor import MessageProcessor
 from .services.discord_service import DiscordService
-from .services.telegram_service import TelegramService
+from .services.telegram import TelegramService
 
 # Global message processor instance
 message_processor: Optional[MessageProcessor] = None
@@ -1188,7 +1188,7 @@ async def health_startup_check():
         # Basic import test
         from .config import get_settings
         from .services.discord_service import DiscordService
-        from .services.telegram_service import TelegramService
+        from .services.telegram import TelegramService
         
         settings = get_settings()
         logger = structlog.get_logger(__name__)

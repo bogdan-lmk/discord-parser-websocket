@@ -9,7 +9,7 @@ from ..models.message import DiscordMessage
 from ..models.server import SystemStats, ServerStatus
 from ..config import Settings
 from .discord_service import DiscordService
-from .telegram_service import TelegramService
+from .telegram import TelegramService
 
 class MessageProcessor:
     """Главный оркестратор - WebSocket ONLY (БЕЗ дублирования сообщений)"""
@@ -22,7 +22,7 @@ class MessageProcessor:
                  logger = None):
         self.settings = settings
         self.discord_service = discord_service
-        self.telegram_service = telegram_service
+        self.telegram = telegram_service
         self.logger = logger or structlog.get_logger(__name__)
         
         # State management
@@ -107,7 +107,7 @@ class MessageProcessor:
         for attempt in range(3):
             try:
                 self.logger.info(f"Initializing Telegram service (attempt {attempt + 1}/3)")
-                if await self.telegram_service.initialize():
+                if await self.telegram.initialize():
                     telegram_initialized = True
                     self.logger.info("✅ Telegram service initialized successfully")
                     break
@@ -129,8 +129,8 @@ class MessageProcessor:
         
         # ИСПРАВЛЕНИЕ: Связываем сервисы и создаем топики
         try:
-            self.telegram_service.set_discord_service(self.discord_service)
-            self.discord_service.set_telegram_service_ref(self.telegram_service)
+            self.telegram.set_discord_service(self.discord_service)
+            self.discord_service.set_telegram_service_ref(self.telegram)
             self.logger.info("✅ Discord-Telegram service integration established")
             
             # Создаем топики для всех серверов
@@ -140,7 +140,7 @@ class MessageProcessor:
             await asyncio.sleep(1)
             
             # Создаем топики
-            created_topics = await self.telegram_service.create_topics_for_all_servers()
+            created_topics = await self.telegram.create_topics_for_all_servers()
             
             server_count = len(self.discord_service.servers)
             topic_count = len(created_topics)
@@ -188,7 +188,7 @@ class MessageProcessor:
         
         self.logger.info("✅ Message Processor initialized successfully",
                         discord_servers=len(self.discord_service.servers),
-                        telegram_topics=len(self.telegram_service.server_topics),
+                        telegram_topics=len(self.telegram.server_topics),
                         realtime_enabled=self.realtime_enabled,
                         monitored_channels=len(self.discord_service.monitored_announcement_channels),
                         mode="Auto-topic-creation + WebSocket",
@@ -348,7 +348,7 @@ class MessageProcessor:
     
     async def ensure_all_servers_have_topics(self):
         """Убедиться что все серверы с мониторимыми каналами имеют топики"""
-        if not hasattr(self.telegram_service, 'ensure_topics_for_all_servers'):
+        if not hasattr(self.telegram, 'ensure_topics_for_all_servers'):
             self.logger.warning("Telegram service doesn't support automatic topic creation")
             return False
         
@@ -366,7 +366,7 @@ class MessageProcessor:
             
             servers_without_topics = []
             for server_name in servers_with_monitored.keys():
-                if server_name not in self.telegram_service.server_topics:
+                if server_name not in self.telegram.server_topics:
                     servers_without_topics.append(server_name)
             
             if servers_without_topics:
@@ -376,7 +376,7 @@ class MessageProcessor:
                     self.logger.warning(f"  • {server_name} ({monitored_count} monitored channels)")
                 
                 # Создаем недостающие топики
-                created_topics = await self.telegram_service.ensure_topics_for_all_servers()
+                created_topics = await self.telegram.ensure_topics_for_all_servers()
                 
                 if created_topics:
                     self.logger.info(f"✅ Created {len(created_topics)} missing topics")
@@ -453,7 +453,7 @@ class MessageProcessor:
         # Start Telegram bot
         try:
             telegram_task = asyncio.create_task(
-                self.telegram_service.start_bot_async(), 
+                self.telegram.start_bot_async(), 
                 name="telegram_bot"
             )
             self.tasks.append(telegram_task)
@@ -537,7 +537,7 @@ class MessageProcessor:
             self.logger.error("Error cleaning up Discord service", error=str(e))
         
         try:
-            await self.telegram_service.cleanup()
+            await self.telegram.cleanup()
             self.logger.info("Telegram service cleaned up")
         except Exception as e:
             cleanup_errors.append(f"Telegram cleanup error: {e}")
@@ -631,7 +631,7 @@ class MessageProcessor:
             if server_messages:
                 # Sort by timestamp and send to Telegram (oldest first)
                 server_messages.sort(key=lambda x: x.timestamp, reverse=False)
-                sent_count = await self.telegram_service.send_messages_batch(server_messages)
+                sent_count = await self.telegram.send_messages_batch(server_messages)
                 
                 total_messages += sent_count
                 self.server_message_counts[server_name] = sent_count
@@ -687,7 +687,7 @@ class MessageProcessor:
             
             # Send to Telegram with retry logic
             try:
-                success = await self.telegram_service.send_message(message)
+                success = await self.telegram.send_message(message)
                 
                 if success:
                     self.stats.messages_processed_today += 1
@@ -883,7 +883,7 @@ class MessageProcessor:
                 discord_healthy = ws_status.get('active_connections', 0) > 0
                 
                 # Check Telegram service health  
-                telegram_healthy = self.telegram_service.bot_running
+                telegram_healthy = self.telegram.bot_running
                 
                 # Check queue sizes
                 queue_healthy = self.message_queue.qsize() < 500
@@ -947,7 +947,7 @@ class MessageProcessor:
                 self.discord_service.rate_limiter, 'requests_last_hour', 0
             )
             self.stats.telegram_requests_per_hour = getattr(
-                self.telegram_service.rate_limiter, 'requests_last_hour', 0
+                self.telegram.rate_limiter, 'requests_last_hour', 0
             )
             
         except Exception as e:
@@ -960,13 +960,13 @@ class MessageProcessor:
         # Enhanced статистики Telegram
         enhanced_features = {}
         try:
-            enhanced_stats = self.telegram_service.get_enhanced_stats()
+            enhanced_stats = self.telegram.get_enhanced_stats()
             enhanced_features = {
                 "telegram_enhanced": enhanced_stats,
-                "anti_duplicate_active": self.telegram_service.startup_verification_done,
-                "bot_interface_active": self.telegram_service.bot_running,
-                "user_states_count": len(getattr(self.telegram_service, 'user_states', {})),
-                "processed_messages_cache": len(getattr(self.telegram_service, 'processed_messages', {}))
+                "anti_duplicate_active": self.telegram.startup_verification_done,
+                "bot_interface_active": self.telegram.bot_running,
+                "user_states_count": len(getattr(self.telegram, 'user_states', {})),
+                "processed_messages_cache": len(getattr(self.telegram, 'processed_messages', {}))
             }
         except Exception as e:
             enhanced_features = {"error": str(e), "available": False}
@@ -1004,9 +1004,9 @@ class MessageProcessor:
                 "monitoring_strategy": "WebSocket Real-time"
             },
             "telegram": {
-                "topics": len(self.telegram_service.server_topics),
-                "bot_running": self.telegram_service.bot_running,
-                "messages_tracked": len(self.telegram_service.message_mappings),
+                "topics": len(self.telegram.server_topics),
+                "bot_running": self.telegram.bot_running,
+                "messages_tracked": len(self.telegram.message_mappings),
                 "one_topic_per_server": True,
                 "enhanced_interface": True
             },
@@ -1030,7 +1030,7 @@ class MessageProcessor:
             },
             "rate_limiting": {
                 "discord": self.discord_service.rate_limiter.get_stats(),
-                "telegram": self.telegram_service.rate_limiter.get_stats()
+                "telegram": self.telegram.rate_limiter.get_stats()
             },
             "enhanced_features": enhanced_features,
             "servers": {
@@ -1219,13 +1219,13 @@ class MessageProcessor:
         
         # Telegram service диагностика
         try:
-            if hasattr(self.telegram_service, 'get_bot_health'):
-                diagnostic["telegram_service"] = self.telegram_service.get_bot_health()
+            if hasattr(self.telegram, 'get_bot_health'):
+                diagnostic["telegram_service"] = self.telegram.get_bot_health()
             else:
                 diagnostic["telegram_service"] = {
                     "available": hasattr(self, 'telegram_service'),
-                    "bot_running": getattr(self.telegram_service, 'bot_running', False),
-                    "topics": len(getattr(self.telegram_service, 'server_topics', {}))
+                    "bot_running": getattr(self.telegram, 'bot_running', False),
+                    "topics": len(getattr(self.telegram, 'server_topics', {}))
                 }
         except Exception as e:
             diagnostic["telegram_service"] = {"error": str(e)}
@@ -1294,8 +1294,8 @@ class MessageProcessor:
                 recovery_steps.append(f"❌ Discord service recovery error: {discord_error}")
             
             try:
-                if hasattr(self.telegram_service, 'get_bot_health'):
-                    telegram_health = self.telegram_service.get_bot_health()
+                if hasattr(self.telegram, 'get_bot_health'):
+                    telegram_health = self.telegram.get_bot_health()
                     if telegram_health.get('status') != 'healthy':
                         self.logger.warning("Telegram service unhealthy, attempting recovery")
                         # Could add Telegram service recovery here
