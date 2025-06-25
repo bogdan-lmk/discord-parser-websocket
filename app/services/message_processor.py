@@ -69,12 +69,12 @@ class MessageProcessor:
         self.websocket_last_message_time = None
         
     async def initialize(self) -> bool:
-        """Initialize all services with enhanced error handling"""
-        self.logger.info("🚀 Initializing Message Processor with WebSocket-only system")
+        """Initialize all services with AUTOMATIC topic creation"""
+        self.logger.info("🚀 Initializing Message Processor with automatic topic creation")
         
         initialization_errors = []
         
-        # Initialize Discord service with retry logic
+        # Initialize Discord service first
         discord_initialized = False
         for attempt in range(3):
             try:
@@ -92,17 +92,14 @@ class MessageProcessor:
                 self.logger.error(error_msg, error_type=type(e).__name__)
                 initialization_errors.append(error_msg)
             
-            if attempt < 2:  # Wait before retry
+            if attempt < 2:
                 await asyncio.sleep(5)
         
         if not discord_initialized:
             self.logger.error("❌ Discord service initialization failed after all attempts")
-            self.logger.error("Discord initialization errors:")
-            for error in initialization_errors[-3:]:  # Show last 3 errors
-                self.logger.error(f"  • {error}")
             return False
         
-        # Initialize Telegram service with retry logic
+        # Initialize Telegram service
         telegram_initialized = False
         for attempt in range(3):
             try:
@@ -120,45 +117,57 @@ class MessageProcessor:
                 self.logger.error(error_msg, error_type=type(e).__name__)
                 initialization_errors.append(error_msg)
             
-            if attempt < 2:  # Wait before retry
+            if attempt < 2:
                 await asyncio.sleep(3)
         
         if not telegram_initialized:
             self.logger.error("❌ Telegram service initialization failed after all attempts")
-            self.logger.error("Telegram initialization errors:")
-            for error in initialization_errors[-3:]:  # Show last 3 errors
-                self.logger.error(f"  • {error}")
             return False
         
-        # Set Discord service reference for channel management
+        # КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ: Связываем сервисы и создаем топики
         try:
             self.telegram_service.set_discord_service(self.discord_service)
-            try:
-                self.telegram_service.set_discord_service(self.discord_service)
-                
-                # ПРИНУДИТЕЛЬНОЕ создание топиков для всех серверов
-                if hasattr(self.telegram_service, 'create_topics_for_all_servers'):
-                    created_topics = await self.telegram_service.create_topics_for_all_servers()
-                    
-                    server_count = len(self.discord_service.servers)
-                    topic_count = len(created_topics)
-                    
-                    self.logger.info("Topic creation results:")
-                    self.logger.info(f"  Servers: {server_count}")
-                    self.logger.info(f"  Topics created: {topic_count}")
-                    
-                    if topic_count < server_count:
-                        missing = server_count - topic_count
-                        self.logger.warning(f"  Missing topics: {missing}")
-                    else:
-                        self.logger.info("  Perfect coverage: ALL servers have topics")
-                    
-            except Exception as e:
-                self.logger.error(f"Error in topic creation: {e}")
             self.logger.info("✅ Discord-Telegram service integration established")
+            
+            # ИСПРАВЛЕНИЕ: Создаем топики после связывания сервисов
+            self.logger.info("🔨 Creating topics for all servers with monitored channels...")
+            
+            # Небольшая задержка для завершения инициализации
+            await asyncio.sleep(1)
+            
+            # Создаем топики для всех серверов с мониторимыми каналами
+            if hasattr(self.telegram_service, 'create_missing_topics_after_discord_init'):
+                created_topics = await self.telegram_service.create_missing_topics_after_discord_init()
+            else:
+                # Fallback для старой версии
+                created_topics = await self.telegram_service.ensure_topics_for_all_servers()
+            
+            server_count = len(self.discord_service.servers)
+            topic_count = len(created_topics)
+            
+            self.logger.info("🎯 Topic creation results:")
+            self.logger.info(f"  • Total servers: {server_count}")
+            self.logger.info(f"  • Topics created/verified: {topic_count}")
+            self.logger.info(f"  • Monitored channels: {len(self.discord_service.monitored_announcement_channels)}")
+            
+            if topic_count < server_count:
+                missing = server_count - topic_count
+                self.logger.warning(f"  • Servers without topics: {missing}")
+                self.logger.warning("    (Some servers may not have monitored channels)")
+            else:
+                self.logger.info("  • Perfect coverage: ALL servers with monitored channels have topics")
+            
+            # Выводим детали созданных топиков
+            if created_topics:
+                self.logger.info("📋 Topic mappings:")
+                for server_name, topic_id in list(created_topics.items())[:10]:
+                    self.logger.info(f"  • {server_name}: {topic_id}")
+                if len(created_topics) > 10:
+                    self.logger.info(f"  • ... and {len(created_topics) - 10} more topics")
+            
         except Exception as e:
-            self.logger.error("❌ Error setting Discord service reference", error=str(e))
-            # Not critical, continue
+            self.logger.error("❌ Error in service integration and topic creation", error=str(e))
+            # Не критично для основной работы, продолжаем
         
         # Register WebSocket message callback
         try:
@@ -166,7 +175,6 @@ class MessageProcessor:
             self.logger.info("✅ WebSocket message callback registered")
         except Exception as e:
             self.logger.error("❌ Error registering WebSocket callback", error=str(e))
-            # Not critical for basic functionality
         
         # Initialize server tracking
         try:
@@ -176,7 +184,6 @@ class MessageProcessor:
             self.logger.info(f"✅ Server tracking initialized for {len(self.discord_service.servers)} servers")
         except Exception as e:
             self.logger.error("❌ Error initializing server tracking", error=str(e))
-            # Initialize empty tracking
             self.server_message_counts = {}
             self.server_last_activity = {}
         
@@ -186,18 +193,17 @@ class MessageProcessor:
             self.logger.info("✅ Initial statistics updated")
         except Exception as e:
             self.logger.warning("⚠️ Error updating initial statistics", error=str(e))
-            # Not critical
         
         self.logger.info("✅ Message Processor initialized successfully",
                         discord_servers=len(self.discord_service.servers),
                         telegram_topics=len(self.telegram_service.server_topics),
                         realtime_enabled=self.realtime_enabled,
                         monitored_channels=len(self.discord_service.monitored_announcement_channels),
-                        mode="WebSocket-only",
+                        mode="Auto-topic-creation + WebSocket",
                         anti_duplication="ACTIVE")
         
         return True
-    
+        
     async def _handle_websocket_message(self, message: DiscordMessage) -> None:
         """Handle WebSocket message with enhanced error handling"""
         try:
@@ -347,6 +353,53 @@ class MessageProcessor:
         limit = 90 if is_realtime else 60
         
         return len(self.message_rate_tracker[server_name]) < limit
+    
+    async def ensure_all_servers_have_topics(self):
+        """Убедиться что все серверы с мониторимыми каналами имеют топики"""
+        if not hasattr(self.telegram_service, 'ensure_topics_for_all_servers'):
+            self.logger.warning("Telegram service doesn't support automatic topic creation")
+            return False
+        
+        try:
+            self.logger.info("🔍 Checking for servers without topics...")
+            
+            servers_with_monitored = {}
+            for server_name, server_info in self.discord_service.servers.items():
+                monitored_count = len([
+                    ch_id for ch_id in server_info.channels.keys()
+                    if ch_id in self.discord_service.monitored_announcement_channels
+                ])
+                if monitored_count > 0:
+                    servers_with_monitored[server_name] = monitored_count
+            
+            servers_without_topics = []
+            for server_name in servers_with_monitored.keys():
+                if server_name not in self.telegram_service.server_topics:
+                    servers_without_topics.append(server_name)
+            
+            if servers_without_topics:
+                self.logger.warning(f"Found {len(servers_without_topics)} servers without topics:")
+                for server_name in servers_without_topics:
+                    monitored_count = servers_with_monitored[server_name]
+                    self.logger.warning(f"  • {server_name} ({monitored_count} monitored channels)")
+                
+                # Создаем недостающие топики
+                created_topics = await self.telegram_service.ensure_topics_for_all_servers()
+                
+                if created_topics:
+                    self.logger.info(f"✅ Created {len(created_topics)} missing topics")
+                    return True
+                else:
+                    self.logger.error("❌ Failed to create missing topics")
+                    return False
+            else:
+                self.logger.info("✅ All servers with monitored channels have topics")
+                return True
+        
+        except Exception as e:
+            self.logger.error(f"Error ensuring topics: {e}")
+            return False
+    
     
     def _update_rate_tracking(self, server_name: str) -> None:
         """Update rate tracking for server"""
