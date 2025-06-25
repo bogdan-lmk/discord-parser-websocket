@@ -106,30 +106,27 @@ class TelegramService:
             return False
     
     async def initialize(self) -> bool:
-            """Initialize with immediate topic creation for all servers"""
-            try:
-                if not self.bot:
-                    return False
-                
-                bot_info = self.bot.get_me()
-                
-                if await self._verify_chat_access():
-                    await self.startup_topic_verification()
-                    
-                    # НОВОЕ: Создать топики для всех серверов сразу после инициализации
-                    if self.discord_service and hasattr(self.discord_service, 'servers'):
-                        servers = getattr(self.discord_service, 'servers', {})
-                        if servers:
-                            created_topics = await self.create_topics_for_all_servers()
-                            if created_topics:
-                                self.logger.info(f"Created {len(created_topics)} topics during initialization")
-                    
-                    return True
-                else:
-                    return False
-                    
-            except Exception as e:
+        """Initialize with immediate topic creation for all servers"""
+        try:
+            if not self.bot:
+                self.logger.error("Telegram bot not initialized")
                 return False
+            
+            bot_info = self.bot.get_me()
+            self.logger.info("Telegram bot initialized", bot_username=bot_info.username)
+            
+            if await self._verify_chat_access():
+                await self.startup_topic_verification()
+                
+                self.logger.info("✅ Telegram service initialized successfully")
+                return True
+            else:
+                self.logger.error("❌ Chat access verification failed")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Telegram service initialization failed: {e}")
+            return False
     
     def _setup_bot_handlers(self):
         """Настройка обработчиков бота"""
@@ -520,13 +517,16 @@ class TelegramService:
     async def create_topics_for_all_servers(self) -> Dict[str, int]:
         """Create topics for ALL servers immediately"""
         if not self.discord_service:
+            self.logger.warning("Discord service not available for topic creation")
             return {}
         
         servers = getattr(self.discord_service, 'servers', {})
         if not servers:
+            self.logger.warning("No servers available for topic creation")
             return {}
         
         if not self._check_if_supergroup_with_topics(self.settings.telegram_chat_id):
+            self.logger.warning("Chat doesn't support topics")
             return {}
         
         created_topics = {}
@@ -546,11 +546,14 @@ class TelegramService:
                 topic_id = await self._create_topic_immediately(server_name)
                 if topic_id:
                     created_topics[server_name] = topic_id
+                    self.logger.info(f"✅ Created topic for {server_name}: {topic_id}")
                     
             except Exception as e:
+                self.logger.error(f"Error creating topic for {server_name}: {e}")
                 continue
         
         self._save_persistent_data()
+        self.logger.info(f"🎯 Created {len(created_topics)} topics for servers")
         return created_topics
     
     async def _create_topic_immediately(self, server_name: str) -> Optional[int]:
@@ -571,14 +574,16 @@ class TelegramService:
                 self.server_topics[server_name] = topic_id
                 self.topic_name_cache[topic_id] = server_name
                 return topic_id
+            else:
+                self.logger.warning(f"Topic created but verification failed: {server_name}")
+                return None
                 
         except Exception as e:
-            pass
-        
-        return None
+            self.logger.error(f"Failed to create topic for {server_name}: {e}")
+            return None
     
     async def startup_topic_verification(self) -> None:
-        """Startup verification + создание топиков для всех серверов"""
+        """Startup verification без автоматического создания топиков"""
         if self.startup_verification_done:
             return
             
@@ -602,18 +607,35 @@ class TelegramService:
                 # Удаляем недействительные топики
                 for server_name in invalid_topics:
                     if server_name in self.server_topics:
+                        old_topic_id = self.server_topics[server_name]
                         del self.server_topics[server_name]
-                        if self.server_topics.get(server_name) in self.topic_name_cache:
-                            del self.topic_name_cache[self.server_topics[server_name]]
+                        if old_topic_id in self.topic_name_cache:
+                            del self.topic_name_cache[old_topic_id]
+                        self.logger.info(f"🗑️ Removed invalid topic for {server_name}")
                 
-                # НОВОЕ: Создаем топики для всех серверов
-                if self.discord_service:
-                    await self.create_topics_for_all_servers()
+                if invalid_topics:
+                    self._save_persistent_data()
+                    self.logger.info(f"🧹 Cleaned {len(invalid_topics)} invalid topics")
                 
                 self.startup_verification_done = True
                 
             except Exception as e:
+                self.logger.error(f"Startup verification error: {e}")
                 self.startup_verification_done = True
+    
+    def set_telegram_service_ref(self, telegram_service):
+        """Set reference to Telegram service for integration"""
+        self.telegram_service_ref = telegram_service
+        self.logger.info("Telegram service reference set for Discord integration")
+        
+        # Проверяем что все необходимые методы доступны
+        if hasattr(telegram_service, 'server_topics'):
+            self.logger.info(f"Telegram service has {len(telegram_service.server_topics)} topics configured")
+        
+        if hasattr(telegram_service, 'add_channel_to_server'):
+            self.logger.info("Telegram service channel management methods available")
+        else:
+            self.logger.warning("Telegram service missing channel management methods")
     
     def _check_if_supergroup_with_topics(self, chat_id: int) -> bool:
         """Check if chat supports forum topics"""

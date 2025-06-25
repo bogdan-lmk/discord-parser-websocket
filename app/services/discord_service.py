@@ -126,7 +126,7 @@ class DiscordService:
         clean_token = token.strip()
         
         # ИСПРАВЛЕНИЕ: Правильная обработка пользовательских токенов
-        # Для пользовательских токенов НЕ добавляем префикс "Bot"
+        # Для пользовательских токенов 
         auth_header = clean_token
         
         # Обновляем заголовки сессии для пользовательского токена
@@ -487,104 +487,6 @@ class DiscordService:
                        by_type=sum(1 for c in announcement_channels if c.get('type') == 5),
                        by_name=sum(1 for c in announcement_channels if c.get('type') != 5))
         return announcement_channels
-    
-    async def ensure_topics_for_all_servers(self):
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создать топики для всех серверов с мониторимыми каналами"""
-        if not self.discord_service:
-            return {}
-        
-        created_topics = {}
-        servers = getattr(self.discord_service, 'servers', {})
-        monitored_channels = getattr(self.discord_service, 'monitored_announcement_channels', set())
-        
-        if not servers or not monitored_channels:
-            self.logger.warning("No servers or monitored channels available for topic creation")
-            return {}
-        
-        # Проверяем поддержку топиков
-        if not self._check_if_supergroup_with_topics(self.settings.telegram_chat_id):
-            self.logger.warning("Chat doesn't support topics, skipping topic creation")
-            return {}
-        
-        self.logger.info(f"🔨 Creating topics for servers with monitored channels...")
-        
-        # Создаем топики только для серверов с мониторимыми каналами
-        for server_name, server_info in servers.items():
-            try:
-                # Проверяем есть ли мониторимые каналы у этого сервера
-                server_monitored_channels = [
-                    ch_id for ch_id in server_info.channels.keys() 
-                    if ch_id in monitored_channels
-                ]
-                
-                if not server_monitored_channels:
-                    self.logger.debug(f"Skipping {server_name} - no monitored channels")
-                    continue
-                
-                self.logger.info(f"Creating topic for {server_name} ({len(server_monitored_channels)} monitored channels)")
-                
-                # Проверяем есть ли уже топик
-                if server_name in self.server_topics:
-                    existing_topic_id = self.server_topics[server_name]
-                    if await self._topic_exists(self.settings.telegram_chat_id, existing_topic_id):
-                        created_topics[server_name] = existing_topic_id
-                        self.logger.info(f"✅ Topic already exists for {server_name}: {existing_topic_id}")
-                        continue
-                    else:
-                        # Удаляем недействительный топик
-                        del self.server_topics[server_name]
-                        if existing_topic_id in self.topic_name_cache:
-                            del self.topic_name_cache[existing_topic_id]
-                
-                # Создаем новый топик
-                topic_id = await self._create_topic_for_server(server_name)
-                
-                if topic_id:
-                    created_topics[server_name] = topic_id
-                    self.server_topics[server_name] = topic_id
-                    self.topic_name_cache[topic_id] = server_name
-                    self.logger.info(f"✅ Created topic for {server_name}: {topic_id}")
-                else:
-                    self.logger.error(f"❌ Failed to create topic for {server_name}")
-                
-                # Небольшая задержка между создания
-                await asyncio.sleep(0.3)
-                
-            except Exception as e:
-                self.logger.error(f"Error creating topic for {server_name}: {e}")
-        
-        # Сохраняем результаты
-        if created_topics:
-            self._save_persistent_data()
-            self.logger.info(f"🎯 Topic creation completed: {len(created_topics)} topics created")
-        
-        return created_topics
-
-    async def _create_topic_for_server(self, server_name: str) -> Optional[int]:
-        """Создать топик для конкретного сервера"""
-        try:
-            topic_name = f"{server_name}"
-            
-            # Создаем топик через Telegram API
-            topic = self.bot.create_forum_topic(
-                chat_id=self.settings.telegram_chat_id,
-                name=topic_name,
-                icon_color=0x6FB9F0  # Синий цвет
-            )
-            
-            topic_id = topic.message_thread_id
-            
-            # Проверяем что топик создан
-            if await self._topic_exists(self.settings.telegram_chat_id, topic_id):
-                return topic_id
-            else:
-                self.logger.warning(f"Topic created but verification failed: {server_name}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Failed to create topic for {server_name}: {e}")
-            return None
-    
     
     async def _test_channel_access_with_retry(self, session: aiohttp.ClientSession, channel_id: str) -> bool:
         """Test channel access with retry logic"""
@@ -1282,22 +1184,25 @@ class DiscordService:
     
     async def create_missing_topics_after_discord_init(self):
         """Создать недостающие топики после полной инициализации Discord service"""
-        if not self.discord_service:
-            self.logger.warning("Discord service not available for topic creation")
+        if not self.telegram_service_ref:
+            self.logger.warning("Telegram service not available for topic creation")
             return {}
         
         # Проверяем что Discord service инициализирован
-        if not getattr(self.discord_service, '_initialization_done', False):
+        if not getattr(self, '_initialization_done', False):
             self.logger.warning("Discord service not fully initialized yet")
             return {}
         
-        servers = getattr(self.discord_service, 'servers', {})
-        monitored_channels = getattr(self.discord_service, 'monitored_announcement_channels', set())
+        servers = getattr(self, 'servers', {})
+        monitored_channels = getattr(self, 'monitored_announcement_channels', set())
         
         self.logger.info(f"🔍 Post-Discord check: {len(servers)} servers, {len(monitored_channels)} monitored channels")
         
         # Создаем топики для серверов с мониторимыми каналами
-        created_topics = await self.ensure_topics_for_all_servers()
+        if hasattr(self.telegram_service_ref, 'create_topics_for_all_servers'):
+            created_topics = await self.telegram_service_ref.create_topics_for_all_servers()
+        else:
+            created_topics = {}
         
         if created_topics:
             self.logger.info(f"🎯 Post-Discord topic creation: {len(created_topics)} new topics")
@@ -1440,38 +1345,52 @@ class DiscordService:
 
     # ИЗМЕНИТЬ метод initialize (заменить метод с улучшенной обработкой ошибок):
     async def initialize(self) -> bool:
-        """Initialize with AUTOMATIC topic creation for all servers"""
+        """Initialize Discord service with ONLY user tokens"""
         try:
-            if not self.bot:
+            self.logger.info("🚀 Initializing Discord Service with user tokens")
+            
+            # Initialize HTTP sessions for each token
+            for i, token in enumerate(self.settings.discord_tokens):
+                try:
+                    # Create session with user token
+                    session = aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=30),
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                    )
+                    
+                    # Validate token and get gateway
+                    if await self._validate_token_and_get_gateway(session, i):
+                        self.sessions.append(session)
+                        self.logger.info(f"✅ User token {i+1} validated successfully")
+                    else:
+                        await session.close()
+                        self.logger.error(f"❌ User token {i+1} validation failed")
+                        
+                except Exception as e:
+                    self.logger.error(f"❌ Error with user token {i+1}: {e}")
+                    try:
+                        await session.close()
+                    except:
+                        pass
+            
+            if not self.sessions:
+                self.logger.error("❌ No valid user tokens available")
                 return False
             
-            bot_info = self.bot.get_me()
-            self.logger.info("Telegram bot initialized", bot_username=bot_info.username)
+            self.logger.info(f"✅ Initialized {len(self.sessions)} valid user token sessions")
             
-            if await self._verify_chat_access():
-                await self.startup_topic_verification()
-                
-                # КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ: Создаем топики сразу после инициализации
-                self.logger.info("🔨 Starting automatic topic creation for servers with monitored channels...")
-                
-                # Небольшая задержка чтобы Discord service успел найти серверы
-                await asyncio.sleep(2)
-                
-                created_topics = await self.ensure_topics_for_all_servers()
-                
-                if created_topics:
-                    self.logger.info(f"✅ Automatic topic creation completed: {len(created_topics)} topics created")
-                    for server_name, topic_id in created_topics.items():
-                        self.logger.info(f"  • {server_name}: {topic_id}")
-                else:
-                    self.logger.warning("⚠️ No topics were created automatically")
-                
-                return True
-            else:
-                return False
-                
+            # Discover servers and channels using user tokens
+            await self._discover_announcement_channels_only()
+            
+            self._initialization_done = True
+            self.logger.info("✅ Discord service initialization completed")
+            
+            return True
+            
         except Exception as e:
-            self.logger.error(f"Telegram service initialization failed: {e}")
+            self.logger.error(f"❌ Discord service initialization failed: {e}")
             return False
     
     async def cleanup(self) -> None:

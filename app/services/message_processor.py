@@ -68,6 +68,9 @@ class MessageProcessor:
         self.websocket_messages_processed = 0
         self.websocket_last_message_time = None
         
+    # app/services/message_processor.py - ИСПРАВЛЕНИЯ
+
+# ЗАМЕНИТЬ метод initialize (строки ~50-150):
     async def initialize(self) -> bool:
         """Initialize all services with AUTOMATIC topic creation"""
         self.logger.info("🚀 Initializing Message Processor with automatic topic creation")
@@ -124,23 +127,20 @@ class MessageProcessor:
             self.logger.error("❌ Telegram service initialization failed after all attempts")
             return False
         
-        # КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ: Связываем сервисы и создаем топики
+        # ИСПРАВЛЕНИЕ: Связываем сервисы и создаем топики
         try:
             self.telegram_service.set_discord_service(self.discord_service)
+            self.discord_service.set_telegram_service_ref(self.telegram_service)
             self.logger.info("✅ Discord-Telegram service integration established")
             
-            # ИСПРАВЛЕНИЕ: Создаем топики после связывания сервисов
+            # Создаем топики для всех серверов
             self.logger.info("🔨 Creating topics for all servers with monitored channels...")
             
             # Небольшая задержка для завершения инициализации
             await asyncio.sleep(1)
             
-            # Создаем топики для всех серверов с мониторимыми каналами
-            if hasattr(self.telegram_service, 'create_missing_topics_after_discord_init'):
-                created_topics = await self.telegram_service.create_missing_topics_after_discord_init()
-            else:
-                # Fallback для старой версии
-                created_topics = await self.telegram_service.ensure_topics_for_all_servers()
+            # Создаем топики
+            created_topics = await self.telegram_service.create_topics_for_all_servers()
             
             server_count = len(self.discord_service.servers)
             topic_count = len(created_topics)
@@ -150,14 +150,6 @@ class MessageProcessor:
             self.logger.info(f"  • Topics created/verified: {topic_count}")
             self.logger.info(f"  • Monitored channels: {len(self.discord_service.monitored_announcement_channels)}")
             
-            if topic_count < server_count:
-                missing = server_count - topic_count
-                self.logger.warning(f"  • Servers without topics: {missing}")
-                self.logger.warning("    (Some servers may not have monitored channels)")
-            else:
-                self.logger.info("  • Perfect coverage: ALL servers with monitored channels have topics")
-            
-            # Выводим детали созданных топиков
             if created_topics:
                 self.logger.info("📋 Topic mappings:")
                 for server_name, topic_id in list(created_topics.items())[:10]:
