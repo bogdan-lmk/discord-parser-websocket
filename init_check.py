@@ -86,7 +86,7 @@ class ServerChannelAnalyzer:
         try:
             from app.config import get_settings
             from app.services.discord_service import DiscordService
-            from app.services.telegram_service import TelegramService
+            from app.services.telegram import TelegramService
             from app.utils.rate_limiter import RateLimiter
             
             settings = get_settings()

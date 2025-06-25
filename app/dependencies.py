@@ -7,7 +7,7 @@ from typing import Optional
 
 from .config import Settings, get_settings
 from .services.discord_service import DiscordService
-from .services.telegram_service import TelegramService  
+from .services.telegram import TelegramService  
 from .services.message_processor import MessageProcessor
 from .utils.logging import setup_logging
 from .utils.rate_limiter import RateLimiter
