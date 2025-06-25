@@ -1,5 +1,5 @@
 from typing import List, Optional
-from ..models.message import DiscordMessage
+from app.models.message import DiscordMessage
 
 class MessageSender:
     """Utility mixin for sending messages to Telegram."""

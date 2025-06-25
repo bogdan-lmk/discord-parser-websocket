@@ -1,10 +1,10 @@
-from ..telegram.message_sender import MessageSender
-from ..telegram.topic_manager import TopicManager
-from ..telegram.bot_handlers import BotHandlers
+from app.models.message import DiscordMessage
+from .message_sender import MessageSender
+from .topic_manager import TopicManager
+from .bot_handlers import BotHandlers
 
-from ..models.message import DiscordMessage
-from ..config import Settings
-from ..utils.rate_limiter import RateLimiter
+from app.config import Settings
+from app.utils.rate_limiter import RateLimiter
 
 class TelegramService(TopicManager, MessageSender, BotHandlers):
     """Facade service combining topic management, message sending and bot handlers."""
