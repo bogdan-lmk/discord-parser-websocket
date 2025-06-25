@@ -59,8 +59,14 @@ class DiscordService:
         self.base_delay = 1.0
         self.max_delay = 60.0
         
-        # WebSocket intents (GUILDS + GUILD_MESSAGES)
-        self.intents = (1 << 0) | (1 << 9)  # GUILDS + GUILD_MESSAGES
+        # WebSocket intents
+        #
+        # In addition to GUILDS (1) and GUILD_MESSAGES (512) we also
+        # explicitly request MESSAGE_CONTENT (1 << 15).  Without this intent
+        # Discord does not send the actual text of messages which leads to the
+        # WebSocket connection receiving events without content.  This caused
+        # real‑time forwarding to silently fail.
+        self.intents = (1 << 0) | (1 << 9) | (1 << 15)
     
     def add_message_callback(self, callback: Callable):
         """Add callback for real-time messages"""
@@ -970,8 +976,9 @@ class DiscordService:
                     "activities": [],
                     "afk": False
                 },
-                # Для пользовательских токенов используем другие intents или вообще их не указываем
-                "intents": 513,  # GUILDS (1) + GUILD_MESSAGES (512) - базовые права
+                # Для корректного получения содержимого сообщений по WebSocket
+                # укажем intents из конфигурации, включающие MESSAGE_CONTENT
+                "intents": self.intents,
                 "capabilities": 16381,  # Пользовательские capabilities
                 "client_state": {
                     "guild_versions": {},
