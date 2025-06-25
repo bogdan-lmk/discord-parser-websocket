@@ -23,6 +23,7 @@ class ChannelInfo(BaseModel):
     # Access tracking
     http_accessible: bool = Field(default=False)
     websocket_accessible: bool = Field(default=False)
+    token_index: Optional[int] = Field(default=None, ge=0)
     last_checked: Optional[datetime] = None
     
     # Statistics

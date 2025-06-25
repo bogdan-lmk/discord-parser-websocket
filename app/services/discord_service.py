@@ -412,7 +412,8 @@ class DiscordService:
                         channel_info = ChannelInfo(
                             channel_id=channel['id'],
                             channel_name=channel['name'],
-                            category_id=channel.get('parent_id')
+                            category_id=channel.get('parent_id'),
+                            token_index=0  # discovered using first token
                         )
                         
                         # Test channel accessibility
@@ -557,7 +558,12 @@ class DiscordService:
                             channel=channel.channel_name)
             return []
 
-        session = self._get_healthy_session()
+        # Use the same token that was verified to access this channel
+        session = None
+        if channel.token_index is not None and 0 <= channel.token_index < len(self.sessions):
+            session = self.sessions[channel.token_index]
+        else:
+            session = self._get_healthy_session()
         if not session:
             self.logger.error("No healthy sessions available")
             return []

@@ -1258,7 +1258,8 @@ class TelegramService:
                 channel_name=channel_name_final,
                 http_accessible=True,  # Will be verified below
                 websocket_accessible=False,
-                last_checked=datetime.now()
+                last_checked=datetime.now(),
+                token_index=0  # tested using first token
             )
             
             # Test channel accessibility through Discord API
