@@ -95,17 +95,19 @@ class RealtimeSyncTester:
         connection_start = time.time()
         
         try:
-            # Добавляем Bot prefix если нужно
-            auth_token = token if token.startswith('Bot ') else f'Bot {token}'
-            
+            # Используем пользовательский токен без префикса "Bot"
+            clean_token = token.strip()
+            if clean_token.startswith('Bot '):
+                clean_token = clean_token[4:].strip()
+
             session = aiohttp.ClientSession(
-                headers={'Authorization': auth_token},
+                headers={'Authorization': clean_token},
                 timeout=aiohttp.ClientTimeout(total=30)
             )
             
             try:
-                # Получаем Gateway URL
-                async with session.get('https://discord.com/api/v10/gateway/bot') as response:
+                # Получаем Gateway URL для пользовательского токена
+                async with session.get('https://discord.com/api/v9/gateway') as response:
                     if response.status != 200:
                         self.logger.error("Failed to get gateway", 
                                         token_index=token_index, 
@@ -274,14 +276,15 @@ class RealtimeSyncTester:
                             error=str(e))
     
     async def _send_identify(self, ws: aiohttp.ClientWebSocketResponse, token_index: int) -> None:
-        """Отправка IDENTIFY"""
-        token = self.discord_tokens[token_index]
-        auth_token = token if token.startswith('Bot ') else f'Bot {token}'
-        
+        """Отправка IDENTIFY для пользовательского токена"""
+        token = self.discord_tokens[token_index].strip()
+        if token.startswith('Bot '):
+            token = token[4:].strip()
+
         identify_payload = {
             "op": 2,
             "d": {
-                "token": auth_token,
+                "token": token,
                 "properties": {
                     "$os": "linux",
                     "$browser": "realtime_sync_tester",
